@@ -22,7 +22,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <getopt.h>
 #include <stdarg.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -36,6 +35,7 @@
 #include "../perf.h"
 #include "util.h"
 #include "trace-event.h"
+#include "debug.h"
 
 static int input_fd;
 
@@ -162,25 +162,23 @@ out:
 static int read_proc_kallsyms(struct pevent *pevent)
 {
 	unsigned int size;
-	char *buf;
 
 	size = read4(pevent);
 	if (!size)
 		return 0;
-
-	buf = malloc(size + 1);
-	if (buf == NULL)
-		return -1;
-
-	if (do_read(buf, size) < 0) {
-		free(buf);
-		return -1;
-	}
-	buf[size] = '\0';
-
-	parse_proc_kallsyms(pevent, buf, size);
-
-	free(buf);
+	/*
+	 * Just skip it, now that we configure libtraceevent to use the
+	 * tools/perf/ symbol resolver.
+	 *
+	 * We need to skip it so that we can continue parsing old perf.data
+	 * files, that contains this /proc/kallsyms payload.
+	 *
+	 * Newer perf.data files will have just the 4-bytes zeros "kallsyms
+	 * payload", so that older tools can continue reading it and interpret
+	 * it as "no kallsyms payload is present".
+	 */
+	lseek(input_fd, size, SEEK_CUR);
+	trace_data_size += size;
 	return 0;
 }
 
@@ -343,7 +341,7 @@ static int read_event_files(struct pevent *pevent)
 	return 0;
 }
 
-ssize_t trace_report(int fd, struct pevent **ppevent, bool __repipe)
+ssize_t trace_report(int fd, struct trace_event *tevent, bool __repipe)
 {
 	char buf[BUFSIZ];
 	char test[] = { 23, 8, 68 };
@@ -356,10 +354,8 @@ ssize_t trace_report(int fd, struct pevent **ppevent, bool __repipe)
 	int host_bigendian;
 	int file_long_size;
 	int file_page_size;
-	struct pevent *pevent;
+	struct pevent *pevent = NULL;
 	int err;
-
-	*ppevent = NULL;
 
 	repipe = __repipe;
 	input_fd = fd;
@@ -390,11 +386,16 @@ ssize_t trace_report(int fd, struct pevent **ppevent, bool __repipe)
 	file_bigendian = buf[0];
 	host_bigendian = bigendian();
 
-	pevent = read_trace_init(file_bigendian, host_bigendian);
-	if (pevent == NULL) {
-		pr_debug("read_trace_init failed");
+	if (trace_event__init(tevent)) {
+		pr_debug("trace_event__init failed");
 		goto out;
 	}
+
+	pevent = tevent->pevent;
+
+	pevent_set_flag(pevent, PEVENT_NSEC_OUTPUT);
+	pevent_set_file_bigendian(pevent, file_bigendian);
+	pevent_set_host_bigendian(pevent, host_bigendian);
 
 	if (do_read(buf, 1) < 0)
 		goto out;
@@ -432,11 +433,10 @@ ssize_t trace_report(int fd, struct pevent **ppevent, bool __repipe)
 		pevent_print_printk(pevent);
 	}
 
-	*ppevent = pevent;
 	pevent = NULL;
 
 out:
 	if (pevent)
-		pevent_free(pevent);
+		trace_event__cleanup(tevent);
 	return size;
 }

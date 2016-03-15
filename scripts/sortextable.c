@@ -31,8 +31,24 @@
 #include <tools/be_byteshift.h>
 #include <tools/le_byteshift.h>
 
+#ifndef EM_ARCOMPACT
+#define EM_ARCOMPACT	93
+#endif
+
+#ifndef EM_XTENSA
+#define EM_XTENSA	94
+#endif
+
 #ifndef EM_AARCH64
 #define EM_AARCH64	183
+#endif
+
+#ifndef EM_MICROBLAZE
+#define EM_MICROBLAZE	189
+#endif
+
+#ifndef EM_ARCV2
+#define EM_ARCV2	195
 #endif
 
 static int fd_map;	/* File descriptor for file being modified. */
@@ -193,6 +209,35 @@ static int compare_relative_table(const void *a, const void *b)
 	return 0;
 }
 
+static void x86_sort_relative_table(char *extab_image, int image_size)
+{
+	int i;
+
+	i = 0;
+	while (i < image_size) {
+		uint32_t *loc = (uint32_t *)(extab_image + i);
+
+		w(r(loc) + i, loc);
+		w(r(loc + 1) + i + 4, loc + 1);
+		w(r(loc + 2) + i + 8, loc + 2);
+
+		i += sizeof(uint32_t) * 3;
+	}
+
+	qsort(extab_image, image_size / 12, 12, compare_relative_table);
+
+	i = 0;
+	while (i < image_size) {
+		uint32_t *loc = (uint32_t *)(extab_image + i);
+
+		w(r(loc) - i, loc);
+		w(r(loc + 1) - (i + 4), loc + 1);
+		w(r(loc + 2) - (i + 8), loc + 2);
+
+		i += sizeof(uint32_t) * 3;
+	}
+}
+
 static void sort_relative_table(char *extab_image, int image_size)
 {
 	int i;
@@ -265,12 +310,19 @@ do_file(char const *const fname)
 		break;
 	case EM_386:
 	case EM_X86_64:
+		custom_sort = x86_sort_relative_table;
+		break;
+
 	case EM_S390:
 		custom_sort = sort_relative_table;
 		break;
+	case EM_ARCOMPACT:
+	case EM_ARCV2:
 	case EM_ARM:
 	case EM_AARCH64:
+	case EM_MICROBLAZE:
 	case EM_MIPS:
+	case EM_XTENSA:
 		break;
 	}  /* end switch */
 

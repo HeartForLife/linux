@@ -1451,7 +1451,7 @@ static const u16 pinmux_data[] = {
 	PINMUX_DATA(PWM1A_MARK, PJ0MD_100),
 };
 
-static struct sh_pfc_pin pinmux_pins[] = {
+static const struct sh_pfc_pin pinmux_pins[] = {
 	/* Port A */
 	PINMUX_GPIO(PA1),
 	PINMUX_GPIO(PA0),
@@ -2830,6 +2830,6 @@ const struct sh_pfc_soc_info sh7269_pinmux_info = {
 	.cfg_regs = pinmux_config_regs,
 	.data_regs = pinmux_data_regs,
 
-	.gpio_data = pinmux_data,
-	.gpio_data_size = ARRAY_SIZE(pinmux_data),
+	.pinmux_data = pinmux_data,
+	.pinmux_data_size = ARRAY_SIZE(pinmux_data),
 };

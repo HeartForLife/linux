@@ -671,7 +671,7 @@ static const u16 pinmux_data[] = {
 	PINMUX_DATA(IRQOUT_MARK, P2MSEL2_1),
 };
 
-static struct sh_pfc_pin pinmux_pins[] = {
+static const struct sh_pfc_pin pinmux_pins[] = {
 	/* PA */
 	PINMUX_GPIO(PA7),
 	PINMUX_GPIO(PA6),
@@ -1269,6 +1269,6 @@ const struct sh_pfc_soc_info sh7785_pinmux_info = {
 	.cfg_regs = pinmux_config_regs,
 	.data_regs = pinmux_data_regs,
 
-	.gpio_data = pinmux_data,
-	.gpio_data_size = ARRAY_SIZE(pinmux_data),
+	.pinmux_data = pinmux_data,
+	.pinmux_data_size = ARRAY_SIZE(pinmux_data),
 };

@@ -96,6 +96,7 @@ struct host1x_info {
 	int	nb_mlocks;		/* host1x: number of mlocks */
 	int	(*init)(struct host1x *); /* initialize per SoC ops */
 	int	sync_offset;
+	u64	dma_mask;		/* mask of addressable memory */
 };
 
 struct host1x {
@@ -305,5 +306,7 @@ static inline void host1x_hw_show_mlocks(struct host1x *host, struct output *o)
 {
 	host->debug_op->show_mlocks(host, o);
 }
+
+extern struct platform_driver tegra_mipi_driver;
 
 #endif

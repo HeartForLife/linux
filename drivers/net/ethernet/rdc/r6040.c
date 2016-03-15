@@ -34,7 +34,6 @@
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
-#include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/mii.h>
 #include <linux/ethtool.h>
@@ -222,6 +221,7 @@ static int r6040_phy_read(void __iomem *ioaddr, int phy_addr, int reg)
 		cmd = ioread16(ioaddr + MMDIO);
 		if (!(cmd & MDIO_READ))
 			break;
+		udelay(1);
 	}
 
 	if (limit < 0)
@@ -245,6 +245,7 @@ static int r6040_phy_write(void __iomem *ioaddr,
 		cmd = ioread16(ioaddr + MMDIO);
 		if (!(cmd & MDIO_WRITE))
 			break;
+		udelay(1);
 	}
 
 	return (limit < 0) ? -ETIMEDOUT : 0;
@@ -267,11 +268,6 @@ static int r6040_mdiobus_write(struct mii_bus *bus, int phy_addr,
 	void __iomem *ioaddr = lp->base;
 
 	return r6040_phy_write(ioaddr, phy_addr, reg, value);
-}
-
-static int r6040_mdiobus_reset(struct mii_bus *bus)
-{
-	return 0;
 }
 
 static void r6040_free_txbufs(struct net_device *dev)
@@ -834,8 +830,8 @@ static netdev_tx_t r6040_start_xmit(struct sk_buff *skb,
 	/* Set TX descriptor & Transmit it */
 	lp->tx_free_desc--;
 	descptr = lp->tx_insert_ptr;
-	if (skb->len < MISR)
-		descptr->len = MISR;
+	if (skb->len < ETH_ZLEN)
+		descptr->len = ETH_ZLEN;
 	else
 		descptr->len = skb->len;
 
@@ -1043,7 +1039,7 @@ static int r6040_mii_probe(struct net_device *dev)
 		return -ENODEV;
 	}
 
-	phydev = phy_connect(dev, dev_name(&phydev->dev), &r6040_adjust_link,
+	phydev = phy_connect(dev, phydev_name(phydev), &r6040_adjust_link,
 			     PHY_INTERFACE_MODE_MII);
 
 	if (IS_ERR(phydev)) {
@@ -1065,9 +1061,7 @@ static int r6040_mii_probe(struct net_device *dev)
 	lp->old_link = 0;
 	lp->old_duplex = -1;
 
-	dev_info(&lp->pdev->dev, "attached PHY driver [%s] "
-		"(mii_bus:phy_addr=%s)\n",
-		phydev->drv->name, dev_name(&phydev->dev));
+	phy_attached_info(phydev);
 
 	return 0;
 }
@@ -1081,7 +1075,6 @@ static int r6040_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	static int card_idx = -1;
 	int bar = 0;
 	u16 *adrp;
-	int i;
 
 	pr_info("%s\n", version);
 
@@ -1190,23 +1183,14 @@ static int r6040_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	lp->mii_bus->priv = dev;
 	lp->mii_bus->read = r6040_mdiobus_read;
 	lp->mii_bus->write = r6040_mdiobus_write;
-	lp->mii_bus->reset = r6040_mdiobus_reset;
 	lp->mii_bus->name = "r6040_eth_mii";
 	snprintf(lp->mii_bus->id, MII_BUS_ID_SIZE, "%s-%x",
 		dev_name(&pdev->dev), card_idx);
-	lp->mii_bus->irq = kmalloc_array(PHY_MAX_ADDR, sizeof(int), GFP_KERNEL);
-	if (!lp->mii_bus->irq) {
-		err = -ENOMEM;
-		goto err_out_mdio;
-	}
-
-	for (i = 0; i < PHY_MAX_ADDR; i++)
-		lp->mii_bus->irq[i] = PHY_POLL;
 
 	err = mdiobus_register(lp->mii_bus);
 	if (err) {
 		dev_err(&pdev->dev, "failed to register MII bus\n");
-		goto err_out_mdio_irq;
+		goto err_out_mdio;
 	}
 
 	err = r6040_mii_probe(dev);
@@ -1225,8 +1209,6 @@ static int r6040_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 err_out_mdio_unregister:
 	mdiobus_unregister(lp->mii_bus);
-err_out_mdio_irq:
-	kfree(lp->mii_bus->irq);
 err_out_mdio:
 	mdiobus_free(lp->mii_bus);
 err_out_unmap:
@@ -1249,7 +1231,6 @@ static void r6040_remove_one(struct pci_dev *pdev)
 
 	unregister_netdev(dev);
 	mdiobus_unregister(lp->mii_bus);
-	kfree(lp->mii_bus->irq);
 	mdiobus_free(lp->mii_bus);
 	netif_napi_del(&lp->napi);
 	pci_iounmap(pdev, lp->base);
@@ -1259,7 +1240,7 @@ static void r6040_remove_one(struct pci_dev *pdev)
 }
 
 
-static DEFINE_PCI_DEVICE_TABLE(r6040_pci_tbl) = {
+static const struct pci_device_id r6040_pci_tbl[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_RDC, 0x6040) },
 	{ 0 }
 };

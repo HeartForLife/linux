@@ -40,10 +40,10 @@
 #include <asm/uaccess.h>
 #include <asm/irq.h>
 #include <asm/io.h>
-#include <asm/immap_qe.h>
-#include <asm/qe.h>
-#include <asm/ucc.h>
-#include <asm/ucc_fast.h>
+#include <soc/fsl/qe/immap_qe.h>
+#include <soc/fsl/qe/qe.h>
+#include <soc/fsl/qe/ucc.h>
+#include <soc/fsl/qe/ucc_fast.h>
 #include <asm/machdep.h>
 
 #include "ucc_geth.h"
@@ -433,11 +433,6 @@ static void hw_add_addr_in_hash(struct ucc_geth_private *ugeth,
 
 	qe_issue_cmd(QE_SET_GROUP_ADDRESS, cecr_subblock,
 		     QE_CR_PROTOCOL_ETHERNET, 0);
-}
-
-static inline int compare_addr(u8 **addr1, u8 **addr2)
-{
-	return memcmp(addr1, addr2, ETH_ALEN);
 }
 
 #ifdef DEBUG
@@ -1389,6 +1384,8 @@ static int adjust_enet_interface(struct ucc_geth_private *ugeth)
 		value = phy_read(tbiphy, ENET_TBI_MII_CR);
 		value &= ~0x1000;	/* Turn off autonegotiation */
 		phy_write(tbiphy, ENET_TBI_MII_CR, value);
+
+		put_device(&tbiphy->mdio.dev);
 	}
 
 	init_check_frame_length_mode(ug_info->lengthCheckRx, &ug_regs->maccfg2);
@@ -1707,8 +1704,10 @@ static void uec_configure_serdes(struct net_device *dev)
 	 * everything for us?  Resetting it takes the link down and requires
 	 * several seconds for it to come back.
 	 */
-	if (phy_read(tbiphy, ENET_TBI_MII_SR) & TBISR_LSTATUS)
+	if (phy_read(tbiphy, ENET_TBI_MII_SR) & TBISR_LSTATUS) {
+		put_device(&tbiphy->mdio.dev);
 		return;
+	}
 
 	/* Single clk mode, mii mode off(for serdes communication) */
 	phy_write(tbiphy, ENET_TBI_MII_ANA, TBIANA_SETTINGS);
@@ -1716,6 +1715,8 @@ static void uec_configure_serdes(struct net_device *dev)
 	phy_write(tbiphy, ENET_TBI_MII_TBICON, TBICON_CLK_SELECT);
 
 	phy_write(tbiphy, ENET_TBI_MII_CR, TBICR_SETTINGS);
+
+	put_device(&tbiphy->mdio.dev);
 }
 
 /* Configure the PHY for dev.
@@ -1733,9 +1734,6 @@ static int init_phy(struct net_device *dev)
 
 	phydev = of_phy_connect(dev, ug_info->phy_node, &adjust_link, 0,
 				priv->phy_interface);
-	if (!phydev)
-		phydev = of_phy_connect_fixed_link(dev, &adjust_link,
-						   priv->phy_interface);
 	if (!phydev) {
 		dev_err(&dev->dev, "Could not attach to PHY\n");
 		return -ENODEV;
@@ -2404,7 +2402,6 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 		if (netif_msg_ifup(ugeth))
 			pr_err("Bad number of Rx threads value\n");
 		return -EINVAL;
-		break;
 	}
 
 	switch (ug_info->numThreadsTx) {
@@ -2427,7 +2424,6 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 		if (netif_msg_ifup(ugeth))
 			pr_err("Bad number of Tx threads value\n");
 		return -EINVAL;
-		break;
 	}
 
 	/* Calculate rx_extended_features */
@@ -2998,11 +2994,11 @@ static int ucc_geth_startup(struct ucc_geth_private *ugeth)
 	if (ug_info->rxExtendedFiltering) {
 		size += THREAD_RX_PRAM_ADDITIONAL_FOR_EXTENDED_FILTERING;
 		if (ug_info->largestexternallookupkeysize ==
-		    QE_FLTR_TABLE_LOOKUP_KEY_SIZE_8_BYTES)
+		    QE_FLTR_LARGEST_EXTERNAL_TABLE_LOOKUP_KEY_SIZE_8_BYTES)
 			size +=
 			    THREAD_RX_PRAM_ADDITIONAL_FOR_EXTENDED_FILTERING_8;
 		if (ug_info->largestexternallookupkeysize ==
-		    QE_FLTR_TABLE_LOOKUP_KEY_SIZE_16_BYTES)
+		    QE_FLTR_LARGEST_EXTERNAL_TABLE_LOOKUP_KEY_SIZE_16_BYTES)
 			size +=
 			    THREAD_RX_PRAM_ADDITIONAL_FOR_EXTENDED_FILTERING_16;
 	}
@@ -3266,7 +3262,7 @@ static int ucc_geth_tx(struct net_device *dev, u8 txQ)
 
 		dev->stats.tx_packets++;
 
-		dev_kfree_skb(skb);
+		dev_consume_skb_any(skb);
 
 		ugeth->tx_skbuff[txQ][ugeth->skb_dirtytx[txQ]] = NULL;
 		ugeth->skb_dirtytx[txQ] =
@@ -3795,6 +3791,16 @@ static int ucc_geth_probe(struct platform_device* ofdev)
 	ug_info->uf_info.irq = irq_of_parse_and_map(np, 0);
 
 	ug_info->phy_node = of_parse_phandle(np, "phy-handle", 0);
+	if (!ug_info->phy_node && of_phy_is_fixed_link(np)) {
+		/*
+		 * In the case of a fixed PHY, the DT node associated
+		 * to the PHY is the Ethernet MAC DT node.
+		 */
+		err = of_phy_register_fixed_link(np);
+		if (err)
+			return err;
+		ug_info->phy_node = of_node_get(np);
+	}
 
 	/* Find the TBI PHY node.  If it's not there, we don't support SGMII */
 	ug_info->tbi_node = of_parse_phandle(np, "tbi-handle", 0);
@@ -3861,8 +3867,11 @@ static int ucc_geth_probe(struct platform_device* ofdev)
 	/* Create an ethernet device instance */
 	dev = alloc_etherdev(sizeof(*ugeth));
 
-	if (dev == NULL)
+	if (dev == NULL) {
+		of_node_put(ug_info->tbi_node);
+		of_node_put(ug_info->phy_node);
 		return -ENOMEM;
+	}
 
 	ugeth = netdev_priv(dev);
 	spin_lock_init(&ugeth->lock);
@@ -3890,12 +3899,17 @@ static int ucc_geth_probe(struct platform_device* ofdev)
 	ugeth->phy_interface = phy_interface;
 	ugeth->max_speed = max_speed;
 
+	/* Carrier starts down, phylib will bring it up */
+	netif_carrier_off(dev);
+
 	err = register_netdev(dev);
 	if (err) {
 		if (netif_msg_probe(ugeth))
 			pr_err("%s: Cannot register net device, aborting\n",
 			       dev->name);
 		free_netdev(dev);
+		of_node_put(ug_info->tbi_node);
+		of_node_put(ug_info->phy_node);
 		return err;
 	}
 
@@ -3919,11 +3933,13 @@ static int ucc_geth_remove(struct platform_device* ofdev)
 	unregister_netdev(dev);
 	free_netdev(dev);
 	ucc_geth_memclean(ugeth);
+	of_node_put(ugeth->ug_info->tbi_node);
+	of_node_put(ugeth->ug_info->phy_node);
 
 	return 0;
 }
 
-static struct of_device_id ucc_geth_match[] = {
+static const struct of_device_id ucc_geth_match[] = {
 	{
 		.type = "network",
 		.compatible = "ucc_geth",
@@ -3936,7 +3952,6 @@ MODULE_DEVICE_TABLE(of, ucc_geth_match);
 static struct platform_driver ucc_geth_driver = {
 	.driver = {
 		.name = DRV_NAME,
-		.owner = THIS_MODULE,
 		.of_match_table = ucc_geth_match,
 	},
 	.probe		= ucc_geth_probe,

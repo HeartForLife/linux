@@ -8,7 +8,11 @@
 #include <linux/thread_info.h>
 
 #define __TYPE_IS_PTR(t) (!__builtin_types_compatible_p(typeof(0?(t)0:0ULL), u64))
-#define __SC_DELOUSE(t,v) (t)(__TYPE_IS_PTR(t) ? ((v) & 0x7fffffff) : (v))
+
+#define __SC_DELOUSE(t,v) ({ \
+	BUILD_BUG_ON(sizeof(t) > 4 && !__TYPE_IS_PTR(t)); \
+	(t)(__TYPE_IS_PTR(t) ? ((v) & 0x7fffffff) : (v)); \
+})
 
 #define PSW32_MASK_PER		0x40000000UL
 #define PSW32_MASK_DAT		0x04000000UL
@@ -38,7 +42,8 @@
 
 #define PSW32_USER_BITS (PSW32_MASK_DAT | PSW32_MASK_IO | PSW32_MASK_EXT | \
 			 PSW32_DEFAULT_KEY | PSW32_MASK_BASE | \
-			 PSW32_MASK_MCHECK | PSW32_MASK_PSTATE | PSW32_ASC_HOME)
+			 PSW32_MASK_MCHECK | PSW32_MASK_PSTATE | \
+			 PSW32_ASC_PRIMARY)
 
 #define COMPAT_USER_HZ		100
 #define COMPAT_UTS_MACHINE	"s390\0\0\0\0"
@@ -279,7 +284,7 @@ static inline compat_uptr_t ptr_to_compat(void __user *uptr)
 
 static inline int is_compat_task(void)
 {
-	return is_32bit_task();
+	return test_thread_flag(TIF_31BIT);
 }
 
 static inline void __user *arch_compat_alloc_user_space(long len)

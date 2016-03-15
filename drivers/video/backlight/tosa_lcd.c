@@ -206,8 +206,8 @@ static int tosa_lcd_probe(struct spi_device *spi)
 
 	tosa_lcd_tg_on(data);
 
-	data->lcd = lcd_device_register("tosa-lcd", &spi->dev, data,
-			&tosa_lcd_ops);
+	data->lcd = devm_lcd_device_register(&spi->dev, "tosa-lcd", &spi->dev,
+					data, &tosa_lcd_ops);
 
 	if (IS_ERR(data->lcd)) {
 		ret = PTR_ERR(data->lcd);
@@ -225,8 +225,6 @@ err_register:
 static int tosa_lcd_remove(struct spi_device *spi)
 {
 	struct tosa_lcd_data *data = spi_get_drvdata(spi);
-
-	lcd_device_unregister(data->lcd);
 
 	if (data->i2c)
 		i2c_unregister_device(data->i2c);
@@ -265,7 +263,6 @@ static SIMPLE_DEV_PM_OPS(tosa_lcd_pm_ops, tosa_lcd_suspend, tosa_lcd_resume);
 static struct spi_driver tosa_lcd_driver = {
 	.driver = {
 		.name		= "tosa-lcd",
-		.owner		= THIS_MODULE,
 		.pm		= &tosa_lcd_pm_ops,
 	},
 	.probe		= tosa_lcd_probe,

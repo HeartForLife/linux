@@ -368,6 +368,7 @@ static struct inode *openprom_iget(struct super_block *sb, ino_t ino)
 
 static int openprom_remount(struct super_block *sb, int *flags, char *data)
 {
+	sync_filesystem(sb);
 	*flags |= MS_NOATIME;
 	return 0;
 }
@@ -442,7 +443,7 @@ static int __init init_openprom_fs(void)
 					    sizeof(struct op_inode_info),
 					    0,
 					    (SLAB_RECLAIM_ACCOUNT |
-					     SLAB_MEM_SPREAD),
+					     SLAB_MEM_SPREAD | SLAB_ACCOUNT),
 					    op_inode_init_once);
 	if (!op_inode_cachep)
 		return -ENOMEM;

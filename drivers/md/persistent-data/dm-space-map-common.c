@@ -245,6 +245,10 @@ int sm_ll_extend(struct ll_disk *ll, dm_block_t extra_blocks)
 		return -EINVAL;
 	}
 
+	/*
+	 * We need to set this before the dm_tm_new_block() call below.
+	 */
+	ll->nr_blocks = nr_blocks;
 	for (i = old_blocks; i < blocks; i++) {
 		struct dm_block *b;
 		struct disk_index_entry idx;
@@ -252,11 +256,10 @@ int sm_ll_extend(struct ll_disk *ll, dm_block_t extra_blocks)
 		r = dm_tm_new_block(ll->tm, &dm_sm_bitmap_validator, &b);
 		if (r < 0)
 			return r;
+
 		idx.blocknr = cpu_to_le64(dm_block_location(b));
 
-		r = dm_tm_unlock(ll->tm, b);
-		if (r < 0)
-			return r;
+		dm_tm_unlock(ll->tm, b);
 
 		idx.nr_free = cpu_to_le32(ll->entries_per_block);
 		idx.none_free_before = 0;
@@ -266,7 +269,6 @@ int sm_ll_extend(struct ll_disk *ll, dm_block_t extra_blocks)
 			return r;
 	}
 
-	ll->nr_blocks = nr_blocks;
 	return 0;
 }
 
@@ -289,7 +291,9 @@ int sm_ll_lookup_bitmap(struct ll_disk *ll, dm_block_t b, uint32_t *result)
 
 	*result = sm_lookup_bitmap(dm_bitmap_data(blk), b);
 
-	return dm_tm_unlock(ll->tm, blk);
+	dm_tm_unlock(ll->tm, blk);
+
+	return 0;
 }
 
 static int sm_ll_lookup_big_ref_count(struct ll_disk *ll, dm_block_t b,
@@ -369,9 +373,7 @@ int sm_ll_find_free_block(struct ll_disk *ll, dm_block_t begin,
 			return r;
 		}
 
-		r = dm_tm_unlock(ll->tm, blk);
-		if (r < 0)
-			return r;
+		dm_tm_unlock(ll->tm, blk);
 
 		*result = i * ll->entries_per_block + (dm_block_t) position;
 		return 0;
@@ -381,7 +383,7 @@ int sm_ll_find_free_block(struct ll_disk *ll, dm_block_t begin,
 }
 
 static int sm_ll_mutate(struct ll_disk *ll, dm_block_t b,
-			uint32_t (*mutator)(void *context, uint32_t old),
+			int (*mutator)(void *context, uint32_t old, uint32_t *new),
 			void *context, enum allocation_event *ev)
 {
 	int r;
@@ -410,18 +412,22 @@ static int sm_ll_mutate(struct ll_disk *ll, dm_block_t b,
 
 	if (old > 2) {
 		r = sm_ll_lookup_big_ref_count(ll, b, &old);
-		if (r < 0)
+		if (r < 0) {
+			dm_tm_unlock(ll->tm, nb);
 			return r;
+		}
 	}
 
-	ref_count = mutator(context, old);
+	r = mutator(context, old, &ref_count);
+	if (r) {
+		dm_tm_unlock(ll->tm, nb);
+		return r;
+	}
 
 	if (ref_count <= 2) {
 		sm_set_bitmap(bm_le, bit, ref_count);
 
-		r = dm_tm_unlock(ll->tm, nb);
-		if (r < 0)
-			return r;
+		dm_tm_unlock(ll->tm, nb);
 
 		if (old > 2) {
 			r = dm_btree_remove(&ll->ref_count_info,
@@ -435,9 +441,7 @@ static int sm_ll_mutate(struct ll_disk *ll, dm_block_t b,
 		__le32 le_rc = cpu_to_le32(ref_count);
 
 		sm_set_bitmap(bm_le, bit, 3);
-		r = dm_tm_unlock(ll->tm, nb);
-		if (r < 0)
-			return r;
+		dm_tm_unlock(ll->tm, nb);
 
 		__dm_bless_for_disk(&le_rc);
 		r = dm_btree_insert(&ll->ref_count_info, ll->ref_count_root,
@@ -465,9 +469,10 @@ static int sm_ll_mutate(struct ll_disk *ll, dm_block_t b,
 	return ll->save_ie(ll, index, &ie_disk);
 }
 
-static uint32_t set_ref_count(void *context, uint32_t old)
+static int set_ref_count(void *context, uint32_t old, uint32_t *new)
 {
-	return *((uint32_t *) context);
+	*new = *((uint32_t *) context);
+	return 0;
 }
 
 int sm_ll_insert(struct ll_disk *ll, dm_block_t b,
@@ -476,9 +481,10 @@ int sm_ll_insert(struct ll_disk *ll, dm_block_t b,
 	return sm_ll_mutate(ll, b, set_ref_count, &ref_count, ev);
 }
 
-static uint32_t inc_ref_count(void *context, uint32_t old)
+static int inc_ref_count(void *context, uint32_t old, uint32_t *new)
 {
-	return old + 1;
+	*new = old + 1;
+	return 0;
 }
 
 int sm_ll_inc(struct ll_disk *ll, dm_block_t b, enum allocation_event *ev)
@@ -486,9 +492,15 @@ int sm_ll_inc(struct ll_disk *ll, dm_block_t b, enum allocation_event *ev)
 	return sm_ll_mutate(ll, b, inc_ref_count, NULL, ev);
 }
 
-static uint32_t dec_ref_count(void *context, uint32_t old)
+static int dec_ref_count(void *context, uint32_t old, uint32_t *new)
 {
-	return old - 1;
+	if (!old) {
+		DMERR_LIMIT("unable to decrement a reference count below 0");
+		return -EINVAL;
+	}
+
+	*new = old - 1;
+	return 0;
 }
 
 int sm_ll_dec(struct ll_disk *ll, dm_block_t b, enum allocation_event *ev)
@@ -538,7 +550,9 @@ static int metadata_ll_init_index(struct ll_disk *ll)
 	memcpy(dm_block_data(b), &ll->mi_le, sizeof(ll->mi_le));
 	ll->bitmap_root = dm_block_location(b);
 
-	return dm_tm_unlock(ll->tm, b);
+	dm_tm_unlock(ll->tm, b);
+
+	return 0;
 }
 
 static int metadata_ll_open(struct ll_disk *ll)
@@ -552,7 +566,9 @@ static int metadata_ll_open(struct ll_disk *ll)
 		return r;
 
 	memcpy(&ll->mi_le, dm_block_data(block), sizeof(ll->mi_le));
-	return dm_tm_unlock(ll->tm, block);
+	dm_tm_unlock(ll->tm, block);
+
+	return 0;
 }
 
 static dm_block_t metadata_ll_max_entries(struct ll_disk *ll)
@@ -572,7 +588,9 @@ static int metadata_ll_commit(struct ll_disk *ll)
 	memcpy(dm_block_data(b), &ll->mi_le, sizeof(ll->mi_le));
 	ll->bitmap_root = dm_block_location(b);
 
-	return dm_tm_unlock(ll->tm, b);
+	dm_tm_unlock(ll->tm, b);
+
+	return 0;
 }
 
 int sm_ll_new_metadata(struct ll_disk *ll, struct dm_transaction_manager *tm)

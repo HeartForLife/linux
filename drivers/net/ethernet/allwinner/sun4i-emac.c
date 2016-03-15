@@ -16,7 +16,6 @@
 #include <linux/etherdevice.h>
 #include <linux/ethtool.h>
 #include <linux/gpio.h>
-#include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
 #include <linux/mii.h>
@@ -29,6 +28,7 @@
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/phy.h>
+#include <linux/soc/sunxi/sunxi_sram.h>
 
 #include "sun4i-emac.h"
 
@@ -269,15 +269,6 @@ static unsigned int emac_setup(struct net_device *ndev)
 	writel(reg_val | EMAC_TX_MODE_ABORTED_FRAME_EN,
 		db->membase + EMAC_TX_MODE_REG);
 
-	/* set up RX */
-	reg_val = readl(db->membase + EMAC_RX_CTL_REG);
-
-	writel(reg_val | EMAC_RX_CTL_PASS_LEN_OOR_EN |
-		EMAC_RX_CTL_ACCEPT_UNICAST_EN | EMAC_RX_CTL_DA_FILTER_EN |
-		EMAC_RX_CTL_ACCEPT_MULTICAST_EN |
-		EMAC_RX_CTL_ACCEPT_BROADCAST_EN,
-		db->membase + EMAC_RX_CTL_REG);
-
 	/* set MAC */
 	/* set MAC CTL0 */
 	reg_val = readl(db->membase + EMAC_MAC_CTL0_REG);
@@ -308,6 +299,26 @@ static unsigned int emac_setup(struct net_device *ndev)
 		db->membase + EMAC_MAC_MAXF_REG);
 
 	return 0;
+}
+
+static void emac_set_rx_mode(struct net_device *ndev)
+{
+	struct emac_board_info *db = netdev_priv(ndev);
+	unsigned int reg_val;
+
+	/* set up RX */
+	reg_val = readl(db->membase + EMAC_RX_CTL_REG);
+
+	if (ndev->flags & IFF_PROMISC)
+		reg_val |= EMAC_RX_CTL_PASS_ALL_EN;
+	else
+		reg_val &= ~EMAC_RX_CTL_PASS_ALL_EN;
+
+	writel(reg_val | EMAC_RX_CTL_PASS_LEN_OOR_EN |
+		EMAC_RX_CTL_ACCEPT_UNICAST_EN | EMAC_RX_CTL_DA_FILTER_EN |
+		EMAC_RX_CTL_ACCEPT_MULTICAST_EN |
+		EMAC_RX_CTL_ACCEPT_BROADCAST_EN,
+		db->membase + EMAC_RX_CTL_REG);
 }
 
 static unsigned int emac_powerup(struct net_device *ndev)
@@ -477,7 +488,7 @@ static int emac_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	spin_unlock_irqrestore(&db->lock, flags);
 
 	/* free this SKB */
-	dev_kfree_skb(skb);
+	dev_consume_skb_any(skb);
 
 	return NETDEV_TX_OK;
 }
@@ -623,8 +634,10 @@ static void emac_rx(struct net_device *dev)
 		}
 
 		/* Move data from EMAC */
-		skb = dev_alloc_skb(rxlen + 4);
-		if (good_packet && skb) {
+		if (good_packet) {
+			skb = netdev_alloc_skb(dev, rxlen + 4);
+			if (!skb)
+				continue;
 			skb_reserve(skb, 2);
 			rdptr = (u8 *) skb_put(skb, rxlen - 4);
 
@@ -717,8 +730,7 @@ static int emac_open(struct net_device *dev)
 	if (netif_msg_ifup(db))
 		dev_dbg(db->dev, "enabling %s\n", dev->name);
 
-	if (devm_request_irq(db->dev, dev->irq, &emac_interrupt,
-			     0, dev->name, dev))
+	if (request_irq(dev->irq, &emac_interrupt, 0, dev->name, dev))
 		return -EAGAIN;
 
 	/* Initialize EMAC board */
@@ -727,6 +739,7 @@ static int emac_open(struct net_device *dev)
 
 	ret = emac_mdio_probe(dev);
 	if (ret < 0) {
+		free_irq(dev->irq, dev);
 		netdev_err(dev, "cannot probe MDIO bus\n");
 		return ret;
 	}
@@ -745,7 +758,7 @@ static void emac_shutdown(struct net_device *dev)
 	/* Disable all interrupt */
 	writel(0, db->membase + EMAC_INT_CTL_REG);
 
-	/* clear interupt status */
+	/* clear interrupt status */
 	reg_val = readl(db->membase + EMAC_INT_STA_REG);
 	writel(reg_val, db->membase + EMAC_INT_STA_REG);
 
@@ -774,6 +787,8 @@ static int emac_stop(struct net_device *ndev)
 
 	emac_shutdown(ndev);
 
+	free_irq(ndev->irq, ndev);
+
 	return 0;
 }
 
@@ -782,6 +797,7 @@ static const struct net_device_ops emac_netdev_ops = {
 	.ndo_stop		= emac_stop,
 	.ndo_start_xmit		= emac_start_xmit,
 	.ndo_tx_timeout		= emac_timeout,
+	.ndo_set_rx_mode	= emac_set_rx_mode,
 	.ndo_do_ioctl		= emac_ioctl,
 	.ndo_change_mtu		= eth_change_mtu,
 	.ndo_validate_addr	= eth_validate_addr,
@@ -831,20 +847,32 @@ static int emac_probe(struct platform_device *pdev)
 	if (ndev->irq == -ENXIO) {
 		netdev_err(ndev, "No irq resource\n");
 		ret = ndev->irq;
-		goto out;
+		goto out_iounmap;
 	}
 
 	db->clk = devm_clk_get(&pdev->dev, NULL);
-	if (IS_ERR(db->clk))
-		goto out;
+	if (IS_ERR(db->clk)) {
+		ret = PTR_ERR(db->clk);
+		goto out_iounmap;
+	}
 
-	clk_prepare_enable(db->clk);
+	ret = clk_prepare_enable(db->clk);
+	if (ret) {
+		dev_err(&pdev->dev, "Error couldn't enable clock (%d)\n", ret);
+		goto out_iounmap;
+	}
+
+	ret = sunxi_sram_claim(&pdev->dev);
+	if (ret) {
+		dev_err(&pdev->dev, "Error couldn't map SRAM to device\n");
+		goto out_clk_disable_unprepare;
+	}
 
 	db->phy_node = of_parse_phandle(np, "phy", 0);
 	if (!db->phy_node) {
 		dev_err(&pdev->dev, "no associated PHY\n");
 		ret = -ENODEV;
-		goto out;
+		goto out_release_sram;
 	}
 
 	/* Read MAC-address from DT */
@@ -863,8 +891,6 @@ static int emac_probe(struct platform_device *pdev)
 	emac_powerup(ndev);
 	emac_reset(db);
 
-	ether_setup(ndev);
-
 	ndev->netdev_ops = &emac_netdev_ops;
 	ndev->watchdog_timeo = msecs_to_jiffies(watchdog);
 	ndev->ethtool_ops = &emac_ethtool_ops;
@@ -878,7 +904,7 @@ static int emac_probe(struct platform_device *pdev)
 	if (ret) {
 		dev_err(&pdev->dev, "Registering netdev failed!\n");
 		ret = -ENODEV;
-		goto out;
+		goto out_release_sram;
 	}
 
 	dev_info(&pdev->dev, "%s: at %p, IRQ %d MAC: %pM\n",
@@ -886,6 +912,12 @@ static int emac_probe(struct platform_device *pdev)
 
 	return 0;
 
+out_release_sram:
+	sunxi_sram_release(&pdev->dev);
+out_clk_disable_unprepare:
+	clk_disable_unprepare(db->clk);
+out_iounmap:
+	iounmap(db->membase);
 out:
 	dev_err(db->dev, "not found (%d).\n", ret);
 
@@ -897,8 +929,12 @@ out:
 static int emac_remove(struct platform_device *pdev)
 {
 	struct net_device *ndev = platform_get_drvdata(pdev);
+	struct emac_board_info *db = netdev_priv(ndev);
 
 	unregister_netdev(ndev);
+	sunxi_sram_release(&pdev->dev);
+	clk_disable_unprepare(db->clk);
+	iounmap(db->membase);
 	free_netdev(ndev);
 
 	dev_dbg(&pdev->dev, "released and freed device\n");
@@ -929,6 +965,9 @@ static int emac_resume(struct platform_device *dev)
 }
 
 static const struct of_device_id emac_of_match[] = {
+	{.compatible = "allwinner,sun4i-a10-emac",},
+
+	/* Deprecated */
 	{.compatible = "allwinner,sun4i-emac",},
 	{},
 };

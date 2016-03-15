@@ -40,11 +40,7 @@ static const struct snd_pcm_hardware imx_pcm_hardware = {
 		SNDRV_PCM_INFO_MMAP_VALID |
 		SNDRV_PCM_INFO_PAUSE |
 		SNDRV_PCM_INFO_RESUME,
-	.formats = SNDRV_PCM_FMTBIT_S16_LE,
-	.rate_min = 8000,
-	.channels_min = 2,
-	.channels_max = 2,
-	.buffer_bytes_max = IMX_SSI_DMABUF_SIZE,
+	.buffer_bytes_max = IMX_DEFAULT_DMABUF_SIZE,
 	.period_bytes_min = 128,
 	.period_bytes_max = 65535, /* Limited by SDMA engine */
 	.periods_min = 2,
@@ -56,21 +52,34 @@ static const struct snd_dmaengine_pcm_config imx_dmaengine_pcm_config = {
 	.pcm_hardware = &imx_pcm_hardware,
 	.prepare_slave_config = snd_dmaengine_pcm_prepare_slave_config,
 	.compat_filter_fn = filter,
-	.prealloc_buffer_size = IMX_SSI_DMABUF_SIZE,
+	.prealloc_buffer_size = IMX_DEFAULT_DMABUF_SIZE,
 };
 
-int imx_pcm_dma_init(struct platform_device *pdev)
+int imx_pcm_dma_init(struct platform_device *pdev, size_t size)
 {
-	return snd_dmaengine_pcm_register(&pdev->dev, &imx_dmaengine_pcm_config,
-		SND_DMAENGINE_PCM_FLAG_NO_RESIDUE |
+	struct snd_dmaengine_pcm_config *config;
+	struct snd_pcm_hardware *pcm_hardware;
+
+	config = devm_kzalloc(&pdev->dev,
+			sizeof(struct snd_dmaengine_pcm_config), GFP_KERNEL);
+	if (!config)
+		return -ENOMEM;
+	*config = imx_dmaengine_pcm_config;
+	if (size)
+		config->prealloc_buffer_size = size;
+
+	pcm_hardware = devm_kzalloc(&pdev->dev,
+			sizeof(struct snd_pcm_hardware), GFP_KERNEL);
+	*pcm_hardware = imx_pcm_hardware;
+	if (size)
+		pcm_hardware->buffer_bytes_max = size;
+
+	config->pcm_hardware = pcm_hardware;
+
+	return devm_snd_dmaengine_pcm_register(&pdev->dev,
+		config,
 		SND_DMAENGINE_PCM_FLAG_COMPAT);
 }
 EXPORT_SYMBOL_GPL(imx_pcm_dma_init);
-
-void imx_pcm_dma_exit(struct platform_device *pdev)
-{
-	snd_dmaengine_pcm_unregister(&pdev->dev);
-}
-EXPORT_SYMBOL_GPL(imx_pcm_dma_exit);
 
 MODULE_LICENSE("GPL");

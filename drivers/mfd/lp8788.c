@@ -71,7 +71,7 @@ static struct resource rtc_irqs[] = {
 	},
 };
 
-static struct mfd_cell lp8788_devs[] = {
+static const struct mfd_cell lp8788_devs[] = {
 	/* 4 bucks */
 	MFD_DEV_WITH_ID(BUCK, 1),
 	MFD_DEV_WITH_ID(BUCK, 2),
@@ -221,7 +221,6 @@ MODULE_DEVICE_TABLE(i2c, lp8788_ids);
 static struct i2c_driver lp8788_driver = {
 	.driver = {
 		.name = "lp8788",
-		.owner = THIS_MODULE,
 	},
 	.probe = lp8788_probe,
 	.remove = lp8788_remove,

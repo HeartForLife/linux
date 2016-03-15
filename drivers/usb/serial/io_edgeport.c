@@ -32,7 +32,6 @@
 #include <linux/kernel.h>
 #include <linux/jiffies.h>
 #include <linux/errno.h>
-#include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/tty.h>
 #include <linux/tty_driver.h>
@@ -898,7 +897,6 @@ static int edge_open(struct tty_struct *tty, struct usb_serial_port *port)
 	edge_port->txfifo.fifo	= kmalloc(edge_port->maxTxCredits, GFP_KERNEL);
 
 	if (!edge_port->txfifo.fifo) {
-		dev_dbg(dev, "%s - no memory\n", __func__);
 		edge_close(port);
 		return -ENOMEM;
 	}
@@ -908,7 +906,6 @@ static int edge_open(struct tty_struct *tty, struct usb_serial_port *port)
 	edge_port->write_in_progress = false;
 
 	if (!edge_port->write_urb) {
-		dev_dbg(dev, "%s - no memory\n", __func__);
 		edge_close(port);
 		return -ENOMEM;
 	}
@@ -1049,9 +1046,8 @@ static void edge_close(struct usb_serial_port *port)
 
 	edge_port->closePending = true;
 
-	if ((!edge_serial->is_epic) ||
-	    ((edge_serial->is_epic) &&
-	     (edge_serial->epic_descriptor.Supports.IOSPChase))) {
+	if (!edge_serial->is_epic ||
+	    edge_serial->epic_descriptor.Supports.IOSPChase) {
 		/* flush and chase */
 		edge_port->chaseResponsePending = true;
 
@@ -1064,9 +1060,8 @@ static void edge_close(struct usb_serial_port *port)
 			edge_port->chaseResponsePending = false;
 	}
 
-	if ((!edge_serial->is_epic) ||
-	    ((edge_serial->is_epic) &&
-	     (edge_serial->epic_descriptor.Supports.IOSPClose))) {
+	if (!edge_serial->is_epic ||
+	    edge_serial->epic_descriptor.Supports.IOSPClose) {
 	       /* close the port */
 		dev_dbg(&port->dev, "%s - Sending IOSP_CMD_CLOSE_PORT\n", __func__);
 		send_iosp_ext_cmd(edge_port, IOSP_CMD_CLOSE_PORT, 0);
@@ -1245,9 +1240,7 @@ static void send_more_port_data(struct edgeport_serial *edge_serial,
 	   to send out */
 	count = fifo->count;
 	buffer = kmalloc(count+2, GFP_ATOMIC);
-	if (buffer == NULL) {
-		dev_err_console(edge_port->port,
-				"%s - no more kernel memory...\n", __func__);
+	if (!buffer) {
 		edge_port->write_in_progress = false;
 		goto exit_send;
 	}
@@ -1593,8 +1586,6 @@ static int edge_ioctl(struct tty_struct *tty,
 	DEFINE_WAIT(wait);
 	struct edgeport_port *edge_port = usb_get_serial_port_data(port);
 
-	dev_dbg(&port->dev, "%s - cmd = 0x%x\n", __func__, cmd);
-
 	switch (cmd) {
 	case TIOCSERGETLSR:
 		dev_dbg(&port->dev, "%s TIOCSERGETLSR\n", __func__);
@@ -1619,9 +1610,8 @@ static void edge_break(struct tty_struct *tty, int break_state)
 	struct edgeport_serial *edge_serial = usb_get_serial_data(port->serial);
 	int status;
 
-	if ((!edge_serial->is_epic) ||
-	    ((edge_serial->is_epic) &&
-	     (edge_serial->epic_descriptor.Supports.IOSPChase))) {
+	if (!edge_serial->is_epic ||
+	    edge_serial->epic_descriptor.Supports.IOSPChase) {
 		/* flush and chase */
 		edge_port->chaseResponsePending = true;
 
@@ -1635,9 +1625,8 @@ static void edge_break(struct tty_struct *tty, int break_state)
 		}
 	}
 
-	if ((!edge_serial->is_epic) ||
-	    ((edge_serial->is_epic) &&
-	     (edge_serial->epic_descriptor.Supports.IOSPSetClrBreak))) {
+	if (!edge_serial->is_epic ||
+	    edge_serial->epic_descriptor.Supports.IOSPSetClrBreak) {
 		if (break_state == -1) {
 			dev_dbg(&port->dev, "%s - Sending IOSP_CMD_SET_BREAK\n", __func__);
 			status = send_iosp_ext_cmd(edge_port,
@@ -2027,11 +2016,8 @@ static int sram_write(struct usb_serial *serial, __u16 extAddr, __u16 addr,
 	dev_dbg(&serial->dev->dev, "%s - %x, %x, %d\n", __func__, extAddr, addr, length);
 
 	transfer_buffer =  kmalloc(64, GFP_KERNEL);
-	if (!transfer_buffer) {
-		dev_err(&serial->dev->dev, "%s - kmalloc(%d) failed.\n",
-							__func__, 64);
+	if (!transfer_buffer)
 		return -ENOMEM;
-	}
 
 	/* need to split these writes up into 64 byte chunks */
 	result = 0;
@@ -2075,11 +2061,8 @@ static int rom_write(struct usb_serial *serial, __u16 extAddr, __u16 addr,
 	unsigned char *transfer_buffer;
 
 	transfer_buffer =  kmalloc(64, GFP_KERNEL);
-	if (!transfer_buffer) {
-		dev_err(&serial->dev->dev, "%s - kmalloc(%d) failed.\n",
-								__func__, 64);
+	if (!transfer_buffer)
 		return -ENOMEM;
-	}
 
 	/* need to split these writes up into 64 byte chunks */
 	result = 0;
@@ -2121,11 +2104,8 @@ static int rom_read(struct usb_serial *serial, __u16 extAddr,
 	unsigned char *transfer_buffer;
 
 	transfer_buffer =  kmalloc(64, GFP_KERNEL);
-	if (!transfer_buffer) {
-		dev_err(&serial->dev->dev,
-			"%s - kmalloc(%d) failed.\n", __func__, 64);
+	if (!transfer_buffer)
 		return -ENOMEM;
-	}
 
 	/* need to split these reads up into 64 byte chunks */
 	result = 0;
@@ -2165,11 +2145,8 @@ static int send_iosp_ext_cmd(struct edgeport_port *edge_port,
 	int             status = 0;
 
 	buffer = kmalloc(10, GFP_ATOMIC);
-	if (!buffer) {
-		dev_err(&edge_port->port->dev,
-				"%s - kmalloc(%d) failed.\n", __func__, 10);
+	if (!buffer)
 		return -ENOMEM;
-	}
 
 	currentCommand = buffer;
 
@@ -2276,10 +2253,9 @@ static int send_cmd_write_baud_rate(struct edgeport_port *edge_port,
 
 	/* Alloc memory for the string of commands. */
 	cmdBuffer =  kmalloc(0x100, GFP_ATOMIC);
-	if (!cmdBuffer) {
-		dev_err(dev, "%s - kmalloc(%d) failed.\n", __func__, 0x100);
+	if (!cmdBuffer)
 		return -ENOMEM;
-	}
+
 	currCmd = cmdBuffer;
 
 	/* Enable access to divisor latch */
@@ -2485,9 +2461,8 @@ static void change_port_settings(struct tty_struct *tty,
 		unsigned char stop_char  = STOP_CHAR(tty);
 		unsigned char start_char = START_CHAR(tty);
 
-		if ((!edge_serial->is_epic) ||
-		    ((edge_serial->is_epic) &&
-		     (edge_serial->epic_descriptor.Supports.IOSPSetXChar))) {
+		if (!edge_serial->is_epic ||
+		    edge_serial->epic_descriptor.Supports.IOSPSetXChar) {
 			send_iosp_ext_cmd(edge_port,
 					IOSP_CMD_SET_XON_CHAR, start_char);
 			send_iosp_ext_cmd(edge_port,
@@ -2514,13 +2489,11 @@ static void change_port_settings(struct tty_struct *tty,
 	}
 
 	/* Set flow control to the configured value */
-	if ((!edge_serial->is_epic) ||
-	    ((edge_serial->is_epic) &&
-	     (edge_serial->epic_descriptor.Supports.IOSPSetRxFlow)))
+	if (!edge_serial->is_epic ||
+	    edge_serial->epic_descriptor.Supports.IOSPSetRxFlow)
 		send_iosp_ext_cmd(edge_port, IOSP_CMD_SET_RX_FLOW, rxFlow);
-	if ((!edge_serial->is_epic) ||
-	    ((edge_serial->is_epic) &&
-	     (edge_serial->epic_descriptor.Supports.IOSPSetTxFlow)))
+	if (!edge_serial->is_epic ||
+	    edge_serial->epic_descriptor.Supports.IOSPSetTxFlow)
 		send_iosp_ext_cmd(edge_port, IOSP_CMD_SET_TX_FLOW, txFlow);
 
 
@@ -2785,10 +2758,9 @@ static int edge_startup(struct usb_serial *serial)
 
 	/* create our private serial structure */
 	edge_serial = kzalloc(sizeof(struct edgeport_serial), GFP_KERNEL);
-	if (edge_serial == NULL) {
-		dev_err(&serial->dev->dev, "%s - Out of memory\n", __func__);
+	if (!edge_serial)
 		return -ENOMEM;
-	}
+
 	spin_lock_init(&edge_serial->es_lock);
 	edge_serial->serial = serial;
 	usb_set_serial_data(serial, edge_serial);
@@ -2877,14 +2849,12 @@ static int edge_startup(struct usb_serial *serial)
 				/* not set up yet, so do it now */
 				edge_serial->interrupt_read_urb =
 						usb_alloc_urb(0, GFP_KERNEL);
-				if (!edge_serial->interrupt_read_urb) {
-					dev_err(ddev, "out of memory\n");
+				if (!edge_serial->interrupt_read_urb)
 					return -ENOMEM;
-				}
+
 				edge_serial->interrupt_in_buffer =
 					kmalloc(buffer_size, GFP_KERNEL);
 				if (!edge_serial->interrupt_in_buffer) {
-					dev_err(ddev, "out of memory\n");
 					usb_free_urb(edge_serial->interrupt_read_urb);
 					return -ENOMEM;
 				}
@@ -2914,14 +2884,12 @@ static int edge_startup(struct usb_serial *serial)
 				/* not set up yet, so do it now */
 				edge_serial->read_urb =
 						usb_alloc_urb(0, GFP_KERNEL);
-				if (!edge_serial->read_urb) {
-					dev_err(ddev, "out of memory\n");
+				if (!edge_serial->read_urb)
 					return -ENOMEM;
-				}
+
 				edge_serial->bulk_in_buffer =
 					kmalloc(buffer_size, GFP_KERNEL);
 				if (!edge_serial->bulk_in_buffer) {
-					dev_err(&dev->dev, "out of memory\n");
 					usb_free_urb(edge_serial->read_urb);
 					return -ENOMEM;
 				}

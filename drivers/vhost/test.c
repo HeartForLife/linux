@@ -53,7 +53,7 @@ static void handle_vq(struct vhost_test *n)
 	vhost_disable_notify(&n->dev, vq);
 
 	for (;;) {
-		head = vhost_get_vq_desc(&n->dev, vq, vq->iov,
+		head = vhost_get_vq_desc(vq, vq->iov,
 					 ARRAY_SIZE(vq->iov),
 					 &out, &in,
 					 NULL, NULL);
@@ -104,7 +104,6 @@ static int vhost_test_open(struct inode *inode, struct file *f)
 	struct vhost_test *n = kmalloc(sizeof *n, GFP_KERNEL);
 	struct vhost_dev *dev;
 	struct vhost_virtqueue **vqs;
-	int r;
 
 	if (!n)
 		return -ENOMEM;
@@ -117,12 +116,7 @@ static int vhost_test_open(struct inode *inode, struct file *f)
 	dev = &n->dev;
 	vqs[VHOST_TEST_VQ] = &n->vqs[VHOST_TEST_VQ];
 	n->vqs[VHOST_TEST_VQ].handle_kick = handle_vq_kick;
-	r = vhost_dev_init(dev, vqs, VHOST_TEST_VQ_MAX);
-	if (r < 0) {
-		kfree(vqs);
-		kfree(n);
-		return r;
-	}
+	vhost_dev_init(dev, vqs, VHOST_TEST_VQ_MAX);
 
 	f->private_data = n;
 
@@ -247,15 +241,18 @@ done:
 
 static int vhost_test_set_features(struct vhost_test *n, u64 features)
 {
+	struct vhost_virtqueue *vq;
+
 	mutex_lock(&n->dev.mutex);
 	if ((features & (1 << VHOST_F_LOG_ALL)) &&
 	    !vhost_log_access_ok(&n->dev)) {
 		mutex_unlock(&n->dev.mutex);
 		return -EFAULT;
 	}
-	n->dev.acked_features = features;
-	smp_wmb();
-	vhost_test_flush(n);
+	vq = &n->vqs[VHOST_TEST_VQ];
+	mutex_lock(&vq->mutex);
+	vq->acked_features = features;
+	mutex_unlock(&vq->mutex);
 	mutex_unlock(&n->dev.mutex);
 	return 0;
 }
@@ -280,10 +277,13 @@ static long vhost_test_ioctl(struct file *f, unsigned int ioctl,
 			return -EFAULT;
 		return 0;
 	case VHOST_SET_FEATURES:
+		printk(KERN_ERR "1\n");
 		if (copy_from_user(&features, featurep, sizeof features))
 			return -EFAULT;
+		printk(KERN_ERR "2\n");
 		if (features & ~VHOST_FEATURES)
 			return -EOPNOTSUPP;
+		printk(KERN_ERR "3\n");
 		return vhost_test_set_features(n, features);
 	case VHOST_RESET_OWNER:
 		return vhost_test_reset_owner(n);

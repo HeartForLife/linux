@@ -36,23 +36,22 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
-#include <linux/clk/tegra.h>
 
 #include "nvec.h"
 
 #define I2C_CNFG			0x00
-#define I2C_CNFG_PACKET_MODE_EN		(1<<10)
-#define I2C_CNFG_NEW_MASTER_SFM		(1<<11)
+#define I2C_CNFG_PACKET_MODE_EN		(1 << 10)
+#define I2C_CNFG_NEW_MASTER_SFM		(1 << 11)
 #define I2C_CNFG_DEBOUNCE_CNT_SHIFT	12
 
 #define I2C_SL_CNFG		0x20
-#define I2C_SL_NEWSL		(1<<2)
-#define I2C_SL_NACK		(1<<1)
-#define I2C_SL_RESP		(1<<0)
-#define I2C_SL_IRQ		(1<<3)
-#define END_TRANS		(1<<4)
-#define RCVD			(1<<2)
-#define RNW			(1<<1)
+#define I2C_SL_NEWSL		(1 << 2)
+#define I2C_SL_NACK		(1 << 1)
+#define I2C_SL_RESP		(1 << 0)
+#define I2C_SL_IRQ		(1 << 3)
+#define END_TRANS		(1 << 4)
+#define RCVD			(1 << 2)
+#define RNW			(1 << 1)
 
 #define I2C_SL_RCVD		0x24
 #define I2C_SL_STATUS		0x28
@@ -83,26 +82,23 @@ enum nvec_sleep_subcmds {
 
 static struct nvec_chip *nvec_power_handle;
 
-static struct mfd_cell nvec_devices[] = {
+static const struct mfd_cell nvec_devices[] = {
 	{
 		.name = "nvec-kbd",
-		.id = 1,
 	},
 	{
 		.name = "nvec-mouse",
-		.id = 1,
+	},
+	{
+		.name = "nvec-power",
+		.id = 0,
 	},
 	{
 		.name = "nvec-power",
 		.id = 1,
-	},
-	{
-		.name = "nvec-power",
-		.id = 2,
 	},
 	{
 		.name = "nvec-paz00",
-		.id = 1,
 	},
 };
 
@@ -233,8 +229,7 @@ static size_t nvec_msg_size(struct nvec_msg *msg)
 		return 2;
 	else if (event_length == NVEC_3BYTES)
 		return 3;
-	else
-		return 0;
+	return 0;
 }
 
 /**
@@ -261,7 +256,7 @@ static void nvec_gpio_set_value(struct nvec_chip *nvec, int value)
  * and return immediately.
  *
  * Returns: 0 on success, a negative error code on failure. If a failure
- * occured, the nvec driver may print an error.
+ * occurred, the nvec driver may print an error.
  */
 int nvec_write_async(struct nvec_chip *nvec, const unsigned char *data,
 			short size)
@@ -679,8 +674,7 @@ static irqreturn_t nvec_interrupt(int irq, void *dev)
 			nvec->rx->data[nvec->rx->pos++] = received;
 		else
 			dev_err(nvec->dev,
-				"RX buffer overflow on %p: "
-				"Trying to write byte %u of %u\n",
+				"RX buffer overflow on %p: Trying to write byte %u of %u\n",
 				nvec->rx, nvec->rx ? nvec->rx->pos : 0,
 				NVEC_MSG_SIZE);
 		break;
@@ -716,7 +710,6 @@ static irqreturn_t nvec_interrupt(int irq, void *dev)
 		status & RCVD ? " RCVD" : "",
 		status & RNW ? " RNW" : "");
 
-
 	/*
 	 * TODO: A correct fix needs to be found for this.
 	 *
@@ -734,9 +727,9 @@ static void tegra_init_i2c_slave(struct nvec_chip *nvec)
 
 	clk_prepare_enable(nvec->i2c_clk);
 
-	tegra_periph_reset_assert(nvec->i2c_clk);
+	reset_control_assert(nvec->rst);
 	udelay(2);
-	tegra_periph_reset_deassert(nvec->i2c_clk);
+	reset_control_deassert(nvec->rst);
 
 	val = I2C_CNFG_NEW_MASTER_SFM | I2C_CNFG_PACKET_MODE_EN |
 	    (0x2 << I2C_CNFG_DEBOUNCE_CNT_SHIFT);
@@ -747,7 +740,7 @@ static void tegra_init_i2c_slave(struct nvec_chip *nvec)
 	writel(I2C_SL_NEWSL, nvec->base + I2C_SL_CNFG);
 	writel(0x1E, nvec->base + I2C_SL_DELAY_COUNT);
 
-	writel(nvec->i2c_addr>>1, nvec->base + I2C_SL_ADDR1);
+	writel(nvec->i2c_addr >> 1, nvec->base + I2C_SL_ADDR1);
 	writel(0, nvec->base + I2C_SL_ADDR2);
 
 	enable_irq(nvec->irq);
@@ -809,10 +802,9 @@ static int tegra_nvec_probe(struct platform_device *pdev)
 	}
 
 	nvec = devm_kzalloc(&pdev->dev, sizeof(struct nvec_chip), GFP_KERNEL);
-	if (nvec == NULL) {
-		dev_err(&pdev->dev, "failed to reserve memory\n");
+	if (!nvec)
 		return -ENOMEM;
-	}
+
 	platform_set_drvdata(pdev, nvec);
 	nvec->dev = &pdev->dev;
 
@@ -825,8 +817,8 @@ static int tegra_nvec_probe(struct platform_device *pdev)
 	if (IS_ERR(base))
 		return PTR_ERR(base);
 
-	res = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
-	if (!res) {
+	nvec->irq = platform_get_irq(pdev, 0);
+	if (nvec->irq < 0) {
 		dev_err(&pdev->dev, "no irq resource?\n");
 		return -ENODEV;
 	}
@@ -837,8 +829,13 @@ static int tegra_nvec_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
+	nvec->rst = devm_reset_control_get(&pdev->dev, "i2c");
+	if (IS_ERR(nvec->rst)) {
+		dev_err(nvec->dev, "failed to get controller reset\n");
+		return PTR_ERR(nvec->rst);
+	}
+
 	nvec->base = base;
-	nvec->irq = res->start;
 	nvec->i2c_clk = i2c_clk;
 	nvec->rx = &nvec->msg_pool[0];
 
@@ -890,8 +887,8 @@ static int tegra_nvec_probe(struct platform_device *pdev)
 		nvec_msg_free(nvec, msg);
 	}
 
-	ret = mfd_add_devices(nvec->dev, -1, nvec_devices,
-			      ARRAY_SIZE(nvec_devices), base, 0, NULL);
+	ret = mfd_add_devices(nvec->dev, 0, nvec_devices,
+			      ARRAY_SIZE(nvec_devices), NULL, 0, NULL);
 	if (ret)
 		dev_err(nvec->dev, "error adding subdevices\n");
 
@@ -918,7 +915,7 @@ static int tegra_nvec_remove(struct platform_device *pdev)
 	nvec_unregister_notifier(nvec, &nvec->nvec_status_notifier);
 	cancel_work_sync(&nvec->rx_work);
 	cancel_work_sync(&nvec->tx_work);
-	/* FIXME: needs check wether nvec is responsible for power off */
+	/* FIXME: needs check whether nvec is responsible for power off */
 	pm_power_off = NULL;
 
 	return 0;
@@ -958,7 +955,7 @@ static int nvec_resume(struct device *dev)
 }
 #endif
 
-static const SIMPLE_DEV_PM_OPS(nvec_pm_ops, nvec_suspend, nvec_resume);
+static SIMPLE_DEV_PM_OPS(nvec_pm_ops, nvec_suspend, nvec_resume);
 
 /* Match table for of_platform binding */
 static const struct of_device_id nvidia_nvec_of_match[] = {
@@ -972,7 +969,6 @@ static struct platform_driver nvec_device_driver = {
 	.remove  = tegra_nvec_remove,
 	.driver  = {
 		.name = "nvec",
-		.owner = THIS_MODULE,
 		.pm = &nvec_pm_ops,
 		.of_match_table = nvidia_nvec_of_match,
 	}

@@ -44,7 +44,7 @@ static struct resource tps80031_rtc_resources[] = {
 };
 
 /* TPS80031 sub mfd devices */
-static struct mfd_cell tps80031_cell[] = {
+static const struct mfd_cell tps80031_cell[] = {
 	{
 		.name = "tps80031-pmic",
 	},
@@ -549,7 +549,6 @@ MODULE_DEVICE_TABLE(i2c, tps80031_id_table);
 static struct i2c_driver tps80031_driver = {
 	.driver	= {
 		.name	= "tps80031",
-		.owner	= THIS_MODULE,
 	},
 	.probe		= tps80031_probe,
 	.remove		= tps80031_remove,

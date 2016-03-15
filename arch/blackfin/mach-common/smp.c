@@ -53,7 +53,6 @@ enum ipi_message_type {
 	BFIN_IPI_TIMER,
 	BFIN_IPI_RESCHEDULE,
 	BFIN_IPI_CALL_FUNC,
-	BFIN_IPI_CALL_FUNC_SINGLE,
 	BFIN_IPI_CPU_STOP,
 };
 
@@ -147,7 +146,7 @@ static irqreturn_t ipi_handler_int1(int irq, void *dev_instance)
 	platform_clear_ipi(cpu, IRQ_SUPPLE_1);
 
 	smp_rmb();
-	bfin_ipi_data = &__get_cpu_var(bfin_ipi);
+	bfin_ipi_data = this_cpu_ptr(&bfin_ipi);
 	while ((pending = atomic_xchg(&bfin_ipi_data->bits, 0)) != 0) {
 		msg = 0;
 		do {
@@ -161,9 +160,6 @@ static irqreturn_t ipi_handler_int1(int irq, void *dev_instance)
 				break;
 			case BFIN_IPI_CALL_FUNC:
 				generic_smp_call_function_interrupt();
-				break;
-			case BFIN_IPI_CALL_FUNC_SINGLE:
-				generic_smp_call_function_single_interrupt();
 				break;
 			case BFIN_IPI_CPU_STOP:
 				ipi_cpu_stop(cpu);
@@ -199,7 +195,7 @@ void send_ipi(const struct cpumask *cpumask, enum ipi_message_type msg)
 	local_irq_save(flags);
 	for_each_cpu(cpu, cpumask) {
 		bfin_ipi_data = &per_cpu(bfin_ipi, cpu);
-		atomic_set_mask((1 << msg), &bfin_ipi_data->bits);
+		atomic_or((1 << msg), &bfin_ipi_data->bits);
 		atomic_inc(&bfin_ipi_data->count);
 	}
 	local_irq_restore(flags);
@@ -210,7 +206,7 @@ void send_ipi(const struct cpumask *cpumask, enum ipi_message_type msg)
 
 void arch_send_call_function_single_ipi(int cpu)
 {
-	send_ipi(cpumask_of(cpu), BFIN_IPI_CALL_FUNC_SINGLE);
+	send_ipi(cpumask_of(cpu), BFIN_IPI_CALL_FUNC);
 }
 
 void arch_send_call_function_ipi_mask(const struct cpumask *mask)
@@ -417,16 +413,14 @@ int __cpu_disable(void)
 	return 0;
 }
 
-static DECLARE_COMPLETION(cpu_killed);
-
 int __cpu_die(unsigned int cpu)
 {
-	return wait_for_completion_timeout(&cpu_killed, 5000);
+	return cpu_wait_death(cpu, 5);
 }
 
 void cpu_die(void)
 {
-	complete(&cpu_killed);
+	(void)cpu_report_death();
 
 	atomic_dec(&init_mm.mm_users);
 	atomic_dec(&init_mm.mm_count);

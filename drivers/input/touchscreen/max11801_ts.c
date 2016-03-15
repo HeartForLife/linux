@@ -33,7 +33,6 @@
  */
 
 #include <linux/module.h>
-#include <linux/init.h>
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
 #include <linux/input.h>
@@ -230,7 +229,6 @@ MODULE_DEVICE_TABLE(i2c, max11801_ts_id);
 static struct i2c_driver max11801_ts_driver = {
 	.driver = {
 		.name	= "max11801_ts",
-		.owner	= THIS_MODULE,
 	},
 	.id_table	= max11801_ts_id,
 	.probe		= max11801_ts_probe,

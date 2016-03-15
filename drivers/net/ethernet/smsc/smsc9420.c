@@ -13,8 +13,7 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+ * along with this program; if not, see <http://www.gnu.org/licenses/>.
  *
  ***************************************************************************
  */
@@ -79,12 +78,11 @@ struct smsc9420_pdata {
 
 	struct phy_device *phy_dev;
 	struct mii_bus *mii_bus;
-	int phy_irq[PHY_MAX_ADDR];
 	int last_duplex;
 	int last_carrier;
 };
 
-static DEFINE_PCI_DEVICE_TABLE(smsc9420_id_table) = {
+static const struct pci_device_id smsc9420_id_table[] = {
 	{ PCI_VENDOR_ID_9420, PCI_DEVICE_ID_9420, PCI_ANY_ID, PCI_ANY_ID, },
 	{ 0, }
 };
@@ -317,7 +315,8 @@ smsc9420_ethtool_getregs(struct net_device *dev, struct ethtool_regs *regs,
 		return;
 
 	for (i = 0; i <= 31; i++)
-		data[j++] = smsc9420_mii_read(phy_dev->bus, phy_dev->addr, i);
+		data[j++] = smsc9420_mii_read(phy_dev->mdio.bus,
+					      phy_dev->mdio.addr, i);
 }
 
 static void smsc9420_eeprom_enable_access(struct smsc9420_pdata *pd)
@@ -1159,16 +1158,13 @@ static int smsc9420_mii_probe(struct net_device *dev)
 	BUG_ON(pd->phy_dev);
 
 	/* Device only supports internal PHY at address 1 */
-	if (!pd->mii_bus->phy_map[1]) {
+	phydev = mdiobus_get_phy(pd->mii_bus, 1);
+	if (!phydev) {
 		netdev_err(dev, "no PHY found at address 1\n");
 		return -ENODEV;
 	}
 
-	phydev = pd->mii_bus->phy_map[1];
-	netif_info(pd, probe, pd->dev, "PHY addr %d, phy_id 0x%08X\n",
-		   phydev->addr, phydev->phy_id);
-
-	phydev = phy_connect(dev, dev_name(&phydev->dev),
+	phydev = phy_connect(dev, phydev_name(phydev),
 			     smsc9420_phy_adjust_link, PHY_INTERFACE_MODE_MII);
 
 	if (IS_ERR(phydev)) {
@@ -1176,13 +1172,12 @@ static int smsc9420_mii_probe(struct net_device *dev)
 		return PTR_ERR(phydev);
 	}
 
-	netdev_info(dev, "attached PHY driver [%s] (mii_bus:phy_addr=%s, irq=%d)\n",
-		    phydev->drv->name, dev_name(&phydev->dev), phydev->irq);
-
 	/* mask with MAC supported features */
 	phydev->supported &= (PHY_BASIC_FEATURES | SUPPORTED_Pause |
 			      SUPPORTED_Asym_Pause);
 	phydev->advertising = phydev->supported;
+
+	phy_attached_info(phydev);
 
 	pd->phy_dev = phydev;
 	pd->last_duplex = -1;
@@ -1194,7 +1189,7 @@ static int smsc9420_mii_probe(struct net_device *dev)
 static int smsc9420_mii_init(struct net_device *dev)
 {
 	struct smsc9420_pdata *pd = netdev_priv(dev);
-	int err = -ENXIO, i;
+	int err = -ENXIO;
 
 	pd->mii_bus = mdiobus_alloc();
 	if (!pd->mii_bus) {
@@ -1207,9 +1202,6 @@ static int smsc9420_mii_init(struct net_device *dev)
 	pd->mii_bus->priv = pd;
 	pd->mii_bus->read = smsc9420_mii_read;
 	pd->mii_bus->write = smsc9420_mii_write;
-	pd->mii_bus->irq = pd->phy_irq;
-	for (i = 0; i < PHY_MAX_ADDR; ++i)
-		pd->mii_bus->irq[i] = PHY_POLL;
 
 	/* Mask all PHYs except ID 1 (internal) */
 	pd->mii_bus->phy_mask = ~(1 << 1);
@@ -1541,7 +1533,7 @@ static int smsc9420_resume(struct pci_dev *pdev)
 
 	pci_set_master(pdev);
 
-	err = pci_enable_wake(pdev, 0, 0);
+	err = pci_enable_wake(pdev, PCI_D0, 0);
 	if (err)
 		netif_warn(pd, ifup, pd->dev, "pci_enable_wake failed: %d\n",
 			   err);

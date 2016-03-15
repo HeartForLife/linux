@@ -105,11 +105,6 @@ struct tx_desc {
 	__le32 txdw7;
 };
 
-union txdesc {
-	struct tx_desc txdesc;
-	unsigned int value[TXDESC_SIZE>>2];
-};
-
 struct	hw_xmit	{
 	struct __queue *sta_queue;
 	int	accnt;
@@ -202,7 +197,6 @@ enum {
 void rtw_sctx_init(struct submit_ctx *sctx, int timeout_ms);
 int rtw_sctx_wait(struct submit_ctx *sctx);
 void rtw_sctx_done_err(struct submit_ctx **sctx, int status);
-void rtw_sctx_done(struct submit_ctx **sctx);
 
 struct xmit_buf {
 	struct list_head list;

@@ -82,7 +82,7 @@ static int ep93xx_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 	 * The clock needs to be enabled to access the PWM registers.
 	 * Configuration can be changed at any time.
 	 */
-	if (!test_bit(PWMF_ENABLED, &pwm->flags)) {
+	if (!pwm_is_enabled(pwm)) {
 		ret = clk_enable(ep93xx_pwm->clk);
 		if (ret)
 			return ret;
@@ -113,7 +113,7 @@ static int ep93xx_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 		ret = -EINVAL;
 	}
 
-	if (!test_bit(PWMF_ENABLED, &pwm->flags))
+	if (!pwm_is_enabled(pwm))
 		clk_disable(ep93xx_pwm->clk);
 
 	return ret;
@@ -224,7 +224,7 @@ static struct platform_driver ep93xx_pwm_driver = {
 module_platform_driver(ep93xx_pwm_driver);
 
 MODULE_DESCRIPTION("Cirrus Logic EP93xx PWM driver");
-MODULE_AUTHOR("Matthieu Crapet <mcrapet@gmail.com>, "
-	      "H Hartley Sweeten <hsweeten@visionengravers.com>");
+MODULE_AUTHOR("Matthieu Crapet <mcrapet@gmail.com>");
+MODULE_AUTHOR("H Hartley Sweeten <hsweeten@visionengravers.com>");
 MODULE_ALIAS("platform:ep93xx-pwm");
 MODULE_LICENSE("GPL");

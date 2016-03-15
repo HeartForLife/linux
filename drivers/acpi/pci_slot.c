@@ -20,10 +20,6 @@
  *  WITHOUT ANY WARRANTY; without even the implied warranty of
  *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  *  General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License along
- *  with this program; if not, write to the Free Software Foundation, Inc.,
- *  51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
 #include <linux/kernel.h>
@@ -35,6 +31,7 @@
 #include <linux/pci.h>
 #include <linux/acpi.h>
 #include <linux/dmi.h>
+#include <linux/pci-acpi.h>
 
 static bool debug;
 static int check_sta_before_sun;

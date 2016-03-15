@@ -18,7 +18,7 @@
 
 /* this file is part of ehci-hcd.c */
 
-#if defined(DEBUG) || defined(CONFIG_DYNAMIC_DEBUG)
+#ifdef CONFIG_DYNAMIC_DEBUG
 
 /* check the values in the HCSPARAMS register
  * (host controller _Structural_ parameters)
@@ -62,7 +62,7 @@ static inline void dbg_hcs_params (struct ehci_hcd *ehci, char *label) {}
 
 #endif
 
-#if defined(DEBUG) || defined(CONFIG_DYNAMIC_DEBUG)
+#ifdef CONFIG_DYNAMIC_DEBUG
 
 /* check the values in the HCCPARAMS register
  * (host controller _Capability_ parameters)
@@ -101,7 +101,7 @@ static inline void dbg_hcc_params (struct ehci_hcd *ehci, char *label) {}
 
 #endif
 
-#if defined(DEBUG) || defined(CONFIG_DYNAMIC_DEBUG)
+#ifdef CONFIG_DYNAMIC_DEBUG
 
 static void __maybe_unused
 dbg_qtd (const char *label, struct ehci_hcd *ehci, struct ehci_qtd *qtd)
@@ -301,7 +301,7 @@ static inline int __maybe_unused
 dbg_port_buf (char *buf, unsigned len, const char *label, int port, u32 status)
 { return 0; }
 
-#endif	/* DEBUG || CONFIG_DYNAMIC_DEBUG */
+#endif	/* CONFIG_DYNAMIC_DEBUG */
 
 /* functions have the "wrong" filename when they're output... */
 #define dbg_status(ehci, label, status) { \
@@ -436,7 +436,8 @@ static void qh_lines (
 	scratch = hc32_to_cpup(ehci, &hw->hw_info1);
 	hw_curr = (mark == '*') ? hc32_to_cpup(ehci, &hw->hw_current) : 0;
 	temp = scnprintf (next, size,
-			"qh/%p dev%d %cs ep%d %08x %08x (%08x%c %s nak%d)",
+			"qh/%p dev%d %cs ep%d %08x %08x (%08x%c %s nak%d)"
+			" [cur %08x next %08x buf[0] %08x]",
 			qh, scratch & 0x007f,
 			speed_char (scratch),
 			(scratch >> 8) & 0x000f,
@@ -444,7 +445,10 @@ static void qh_lines (
 			hc32_to_cpup(ehci, &hw->hw_token), mark,
 			(cpu_to_hc32(ehci, QTD_TOGGLE) & hw->hw_token)
 				? "data1" : "data0",
-			(hc32_to_cpup(ehci, &hw->hw_alt_next) >> 1) & 0x0f);
+			(hc32_to_cpup(ehci, &hw->hw_alt_next) >> 1) & 0x0f,
+			hc32_to_cpup(ehci, &hw->hw_current),
+			hc32_to_cpup(ehci, &hw->hw_qtd_next),
+			hc32_to_cpup(ehci, &hw->hw_buf[0]));
 	size -= temp;
 	next += temp;
 
@@ -464,7 +468,8 @@ static void qh_lines (
 				mark = '/';
 		}
 		temp = snprintf (next, size,
-				"\n\t%p%c%s len=%d %08x urb %p",
+				"\n\t%p%c%s len=%d %08x urb %p"
+				" [td %08x buf[0] %08x]",
 				td, mark, ({ char *tmp;
 				 switch ((scratch>>8)&0x03) {
 				 case 0: tmp = "out"; break;
@@ -474,7 +479,9 @@ static void qh_lines (
 				 } tmp;}),
 				(scratch >> 16) & 0x7fff,
 				scratch,
-				td->urb);
+				td->urb,
+				(u32) td->qtd_dma,
+				hc32_to_cpup(ehci, &td->hw_buf[0]));
 		if (size < temp)
 			temp = size;
 		size -= temp;
@@ -628,7 +635,8 @@ static ssize_t fill_periodic_buffer(struct debug_buffer *buf)
 	unsigned		i;
 	__hc32			tag;
 
-	if (!(seen = kmalloc (DBG_SCHED_LIMIT * sizeof *seen, GFP_ATOMIC)))
+	seen = kmalloc(DBG_SCHED_LIMIT * sizeof *seen, GFP_ATOMIC);
+	if (!seen)
 		return 0;
 	seen_count = 0;
 
@@ -818,7 +826,7 @@ static ssize_t fill_registers_buffer(struct debug_buffer *buf)
 
 #ifdef	CONFIG_PCI
 	/* EHCI 0.96 and later may have "extended capabilities" */
-	if (hcd->self.controller->bus == &pci_bus_type) {
+	if (dev_is_pci(hcd->self.controller)) {
 		struct pci_dev	*pdev;
 		u32		offset, cap, cap2;
 		unsigned	count = 256/4;

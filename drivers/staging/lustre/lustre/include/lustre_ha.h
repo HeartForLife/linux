@@ -27,7 +27,7 @@
  * Copyright (c) 2002, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
- * Copyright (c) 2011, Intel Corporation.
+ * Copyright (c) 2011, 2015, Intel Corporation.
  */
 /*
  * This file is part of Lustre, http://www.lustre.org/
@@ -47,7 +47,6 @@ struct obd_export;
 struct obd_device;
 struct ptlrpc_request;
 
-
 int ptlrpc_replay(struct obd_import *imp);
 int ptlrpc_resend(struct obd_import *imp);
 void ptlrpc_free_committed(struct obd_import *imp);
@@ -58,9 +57,6 @@ void ptlrpc_activate_import(struct obd_import *imp);
 void ptlrpc_deactivate_import(struct obd_import *imp);
 void ptlrpc_invalidate_import(struct obd_import *imp);
 void ptlrpc_fail_import(struct obd_import *imp, __u32 conn_cnt);
-int ptlrpc_check_suspend(void);
-void ptlrpc_activate_timeouts(struct obd_import *imp);
-void ptlrpc_deactivate_timeouts(struct obd_import *imp);
 
 /** @} ha */
 

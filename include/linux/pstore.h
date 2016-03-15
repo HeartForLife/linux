@@ -39,6 +39,8 @@ enum pstore_type_id {
 	PSTORE_TYPE_PPC_RTAS	= 4,
 	PSTORE_TYPE_PPC_OF	= 5,
 	PSTORE_TYPE_PPC_COMMON	= 6,
+	PSTORE_TYPE_PMSG	= 7,
+	PSTORE_TYPE_PPC_OPAL	= 8,
 	PSTORE_TYPE_UNKNOWN	= 255
 };
 
@@ -51,6 +53,7 @@ struct pstore_info {
 	char		*buf;
 	size_t		bufsize;
 	struct mutex	read_mutex;	/* serialize open/read/close */
+	int		flags;
 	int		(*open)(struct pstore_info *psi);
 	int		(*close)(struct pstore_info *psi);
 	ssize_t		(*read)(u64 *id, enum pstore_type_id *type,
@@ -70,20 +73,10 @@ struct pstore_info {
 	void		*data;
 };
 
-#ifdef CONFIG_PSTORE
+#define	PSTORE_FLAGS_FRAGILE	1
+
 extern int pstore_register(struct pstore_info *);
+extern void pstore_unregister(struct pstore_info *);
 extern bool pstore_cannot_block_path(enum kmsg_dump_reason reason);
-#else
-static inline int
-pstore_register(struct pstore_info *psi)
-{
-	return -ENODEV;
-}
-static inline bool
-pstore_cannot_block_path(enum kmsg_dump_reason reason)
-{
-	return false;
-}
-#endif
 
 #endif /*_LINUX_PSTORE_H*/

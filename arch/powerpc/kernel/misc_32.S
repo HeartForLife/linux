@@ -57,11 +57,14 @@ _GLOBAL(call_do_softirq)
 	mtlr	r0
 	blr
 
+/*
+ * void call_do_irq(struct pt_regs *regs, struct thread_info *irqtp);
+ */
 _GLOBAL(call_do_irq)
 	mflr	r0
 	stw	r0,4(r1)
 	lwz	r10,THREAD+KSP_LIMIT(r2)
-	addi	r11,r3,THREAD_INFO_GAP
+	addi	r11,r4,THREAD_INFO_GAP
 	stwu	r1,THREAD_SIZE-STACK_FRAME_OVERHEAD(r4)
 	mr	r1,r4
 	stw	r10,8(r1)
@@ -344,7 +347,7 @@ END_FTR_SECTION_IFSET(CPU_FTR_UNIFIED_ID_CACHE)
  */
 _KPROBE(flush_icache_range)
 BEGIN_FTR_SECTION
-	isync
+	PURGE_PREFETCHED_INS
 	blr				/* for 601, do nothing */
 END_FTR_SECTION_IFSET(CPU_FTR_COHERENT_ICACHE)
 	li	r5,L1_CACHE_BYTES-1
@@ -448,6 +451,7 @@ _GLOBAL(invalidate_dcache_range)
  */
 _GLOBAL(__flush_dcache_icache)
 BEGIN_FTR_SECTION
+	PURGE_PREFETCHED_INS
 	blr
 END_FTR_SECTION_IFSET(CPU_FTR_COHERENT_ICACHE)
 	rlwinm	r3,r3,0,0,31-PAGE_SHIFT		/* Get page base address */
@@ -489,6 +493,7 @@ END_MMU_FTR_SECTION_IFSET(MMU_FTR_TYPE_44x)
  */
 _GLOBAL(__flush_dcache_icache_phys)
 BEGIN_FTR_SECTION
+	PURGE_PREFETCHED_INS
 	blr					/* for 601, do nothing */
 END_FTR_SECTION_IFSET(CPU_FTR_COHERENT_ICACHE)
 	mfmsr	r10
@@ -589,25 +594,6 @@ _GLOBAL(copy_page)
 	li	r0,MAX_COPY_PREFETCH
 	li	r11,4
 	b	2b
-
-/*
- * void atomic_clear_mask(atomic_t mask, atomic_t *addr)
- * void atomic_set_mask(atomic_t mask, atomic_t *addr);
- */
-_GLOBAL(atomic_clear_mask)
-10:	lwarx	r5,0,r4
-	andc	r5,r5,r3
-	PPC405_ERR77(0,r4)
-	stwcx.	r5,0,r4
-	bne-	10b
-	blr
-_GLOBAL(atomic_set_mask)
-10:	lwarx	r5,0,r4
-	or	r5,r5,r3
-	PPC405_ERR77(0,r4)
-	stwcx.	r5,0,r4
-	bne-	10b
-	blr
 
 /*
  * Extended precision shifts.
@@ -757,6 +743,8 @@ relocate_new_kernel:
 	/* Check for 47x cores */
 	mfspr	r3,SPRN_PVR
 	srwi	r3,r3,16
+	cmplwi	cr0,r3,PVR_476FPE@h
+	beq	setup_map_47x
 	cmplwi	cr0,r3,PVR_476@h
 	beq	setup_map_47x
 	cmplwi	cr0,r3,PVR_476_ISS@h

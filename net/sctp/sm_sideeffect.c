@@ -22,9 +22,8 @@
  * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, write to
- * the Free Software Foundation, 59 Temple Place - Suite 330,
- * Boston, MA 02111-1307, USA.
+ * along with GNU CC; see the file COPYING.  If not, see
+ * <http://www.gnu.org/licenses/>.
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
@@ -64,7 +63,7 @@ static int sctp_cmd_interpreter(sctp_event_t event_type,
 static int sctp_side_effects(sctp_event_t event_type, sctp_subtype_t subtype,
 			     sctp_state_t state,
 			     struct sctp_endpoint *ep,
-			     struct sctp_association *asoc,
+			     struct sctp_association **asoc,
 			     void *event_arg,
 			     sctp_disposition_t status,
 			     sctp_cmd_seq_t *commands,
@@ -245,12 +244,13 @@ void sctp_generate_t3_rtx_event(unsigned long peer)
 	int error;
 	struct sctp_transport *transport = (struct sctp_transport *) peer;
 	struct sctp_association *asoc = transport->asoc;
-	struct net *net = sock_net(asoc->base.sk);
+	struct sock *sk = asoc->base.sk;
+	struct net *net = sock_net(sk);
 
 	/* Check whether a task is in the sock.  */
 
-	sctp_bh_lock_sock(asoc->base.sk);
-	if (sock_owned_by_user(asoc->base.sk)) {
+	bh_lock_sock(sk);
+	if (sock_owned_by_user(sk)) {
 		pr_debug("%s: sock is busy\n", __func__);
 
 		/* Try again later.  */
@@ -258,12 +258,6 @@ void sctp_generate_t3_rtx_event(unsigned long peer)
 			sctp_transport_hold(transport);
 		goto out_unlock;
 	}
-
-	/* Is this transport really dead and just waiting around for
-	 * the timer to let go of the reference?
-	 */
-	if (transport->dead)
-		goto out_unlock;
 
 	/* Run through the state machine.  */
 	error = sctp_do_sm(net, SCTP_EVENT_T_TIMEOUT,
@@ -273,10 +267,10 @@ void sctp_generate_t3_rtx_event(unsigned long peer)
 			   transport, GFP_ATOMIC);
 
 	if (error)
-		asoc->base.sk->sk_err = -error;
+		sk->sk_err = -error;
 
 out_unlock:
-	sctp_bh_unlock_sock(asoc->base.sk);
+	bh_unlock_sock(sk);
 	sctp_transport_put(transport);
 }
 
@@ -286,11 +280,12 @@ out_unlock:
 static void sctp_generate_timeout_event(struct sctp_association *asoc,
 					sctp_event_timeout_t timeout_type)
 {
-	struct net *net = sock_net(asoc->base.sk);
+	struct sock *sk = asoc->base.sk;
+	struct net *net = sock_net(sk);
 	int error = 0;
 
-	sctp_bh_lock_sock(asoc->base.sk);
-	if (sock_owned_by_user(asoc->base.sk)) {
+	bh_lock_sock(sk);
+	if (sock_owned_by_user(sk)) {
 		pr_debug("%s: sock is busy: timer %d\n", __func__,
 			 timeout_type);
 
@@ -313,10 +308,10 @@ static void sctp_generate_timeout_event(struct sctp_association *asoc,
 			   (void *)timeout_type, GFP_ATOMIC);
 
 	if (error)
-		asoc->base.sk->sk_err = -error;
+		sk->sk_err = -error;
 
 out_unlock:
-	sctp_bh_unlock_sock(asoc->base.sk);
+	bh_unlock_sock(sk);
 	sctp_association_put(asoc);
 }
 
@@ -366,10 +361,11 @@ void sctp_generate_heartbeat_event(unsigned long data)
 	int error = 0;
 	struct sctp_transport *transport = (struct sctp_transport *) data;
 	struct sctp_association *asoc = transport->asoc;
-	struct net *net = sock_net(asoc->base.sk);
+	struct sock *sk = asoc->base.sk;
+	struct net *net = sock_net(sk);
 
-	sctp_bh_lock_sock(asoc->base.sk);
-	if (sock_owned_by_user(asoc->base.sk)) {
+	bh_lock_sock(sk);
+	if (sock_owned_by_user(sk)) {
 		pr_debug("%s: sock is busy\n", __func__);
 
 		/* Try again later.  */
@@ -378,22 +374,16 @@ void sctp_generate_heartbeat_event(unsigned long data)
 		goto out_unlock;
 	}
 
-	/* Is this structure just waiting around for us to actually
-	 * get destroyed?
-	 */
-	if (transport->dead)
-		goto out_unlock;
-
 	error = sctp_do_sm(net, SCTP_EVENT_T_TIMEOUT,
 			   SCTP_ST_TIMEOUT(SCTP_EVENT_TIMEOUT_HEARTBEAT),
 			   asoc->state, asoc->ep, asoc,
 			   transport, GFP_ATOMIC);
 
-	 if (error)
-		 asoc->base.sk->sk_err = -error;
+	if (error)
+		sk->sk_err = -error;
 
 out_unlock:
-	sctp_bh_unlock_sock(asoc->base.sk);
+	bh_unlock_sock(sk);
 	sctp_transport_put(transport);
 }
 
@@ -404,10 +394,11 @@ void sctp_generate_proto_unreach_event(unsigned long data)
 {
 	struct sctp_transport *transport = (struct sctp_transport *) data;
 	struct sctp_association *asoc = transport->asoc;
-	struct net *net = sock_net(asoc->base.sk);
-	
-	sctp_bh_lock_sock(asoc->base.sk);
-	if (sock_owned_by_user(asoc->base.sk)) {
+	struct sock *sk = asoc->base.sk;
+	struct net *net = sock_net(sk);
+
+	bh_lock_sock(sk);
+	if (sock_owned_by_user(sk)) {
 		pr_debug("%s: sock is busy\n", __func__);
 
 		/* Try again later.  */
@@ -428,7 +419,7 @@ void sctp_generate_proto_unreach_event(unsigned long data)
 		   asoc->state, asoc->ep, asoc, transport, GFP_ATOMIC);
 
 out_unlock:
-	sctp_bh_unlock_sock(asoc->base.sk);
+	bh_unlock_sock(sk);
 	sctp_association_put(asoc);
 }
 
@@ -474,6 +465,8 @@ static void sctp_do_8_2_transport_strike(sctp_cmd_seq_t *commands,
 					 struct sctp_transport *transport,
 					 int is_hb)
 {
+	struct net *net = sock_net(asoc->base.sk);
+
 	/* The check for association's overall error counter exceeding the
 	 * threshold is done in the state function.
 	 */
@@ -496,11 +489,12 @@ static void sctp_do_8_2_transport_strike(sctp_cmd_seq_t *commands,
 	}
 
 	/* If the transport error count is greater than the pf_retrans
-	 * threshold, and less than pathmaxrtx, then mark this transport
-	 * as Partially Failed, ee SCTP Quick Failover Draft, secon 5.1,
-	 * point 1
+	 * threshold, and less than pathmaxrtx, and if the current state
+	 * is SCTP_ACTIVE, then mark this transport as Partially Failed,
+	 * see SCTP Quick Failover Draft, section 5.1
 	 */
-	if ((transport->state != SCTP_PF) &&
+	if (net->sctp.pf_enable &&
+	   (transport->state == SCTP_ACTIVE) &&
 	   (asoc->pf_retrans < transport->pathmaxrxt) &&
 	   (transport->error_count > asoc->pf_retrans)) {
 
@@ -544,7 +538,7 @@ static void sctp_cmd_init_failed(sctp_cmd_seq_t *commands,
 {
 	struct sctp_ulpevent *event;
 
-	event = sctp_ulpevent_make_assoc_change(asoc,0, SCTP_CANT_STR_ASSOC,
+	event = sctp_ulpevent_make_assoc_change(asoc, 0, SCTP_CANT_STR_ASSOC,
 						(__u16)error, 0, 0, NULL,
 						GFP_ATOMIC);
 
@@ -703,7 +697,7 @@ static void sctp_cmd_transport_on(sctp_cmd_seq_t *cmds,
 	 * outstanding data and rely on the retransmission limit be reached
 	 * to shutdown the association.
 	 */
-	if (t->asoc->state != SCTP_STATE_SHUTDOWN_PENDING)
+	if (t->asoc->state < SCTP_STATE_SHUTDOWN_PENDING)
 		t->asoc->overall_error_count = 0;
 
 	/* Clear the hb_sent flag to signal that we had a good
@@ -860,7 +854,6 @@ static void sctp_cmd_delete_tcb(sctp_cmd_seq_t *cmds,
 	    (!asoc->temp) && (sk->sk_shutdown != SHUTDOWN_MASK))
 		return;
 
-	sctp_unhash_established(asoc);
 	sctp_association_free(asoc);
 }
 
@@ -955,7 +948,7 @@ static void sctp_cmd_del_non_primary(struct sctp_association *asoc)
 		t = list_entry(pos, struct sctp_transport, transports);
 		if (!sctp_cmp_addr_exact(&t->ipaddr,
 					 &asoc->peer.primary_addr)) {
-			sctp_assoc_del_peer(asoc, &t->ipaddr);
+			sctp_assoc_rm_peer(asoc, t);
 		}
 	}
 }
@@ -1116,11 +1109,11 @@ int sctp_do_sm(struct net *net, sctp_event_t event_type, sctp_subtype_t subtype,
 	sctp_init_cmd_seq(&commands);
 
 	debug_pre_sfn();
-	status = (*state_fn->fn)(net, ep, asoc, subtype, event_arg, &commands);
+	status = state_fn->fn(net, ep, asoc, subtype, event_arg, &commands);
 	debug_post_sfn();
 
 	error = sctp_side_effects(event_type, subtype, state,
-				  ep, asoc, event_arg, status,
+				  ep, &asoc, event_arg, status,
 				  &commands, gfp);
 	debug_post_sfx();
 
@@ -1133,7 +1126,7 @@ int sctp_do_sm(struct net *net, sctp_event_t event_type, sctp_subtype_t subtype,
 static int sctp_side_effects(sctp_event_t event_type, sctp_subtype_t subtype,
 			     sctp_state_t state,
 			     struct sctp_endpoint *ep,
-			     struct sctp_association *asoc,
+			     struct sctp_association **asoc,
 			     void *event_arg,
 			     sctp_disposition_t status,
 			     sctp_cmd_seq_t *commands,
@@ -1148,7 +1141,7 @@ static int sctp_side_effects(sctp_event_t event_type, sctp_subtype_t subtype,
 	 * disposition SCTP_DISPOSITION_CONSUME.
 	 */
 	if (0 != (error = sctp_cmd_interpreter(event_type, subtype, state,
-					       ep, asoc,
+					       ep, *asoc,
 					       event_arg, status,
 					       commands, gfp)))
 		goto bail;
@@ -1171,11 +1164,12 @@ static int sctp_side_effects(sctp_event_t event_type, sctp_subtype_t subtype,
 		break;
 
 	case SCTP_DISPOSITION_DELETE_TCB:
+	case SCTP_DISPOSITION_ABORT:
 		/* This should now be a command. */
+		*asoc = NULL;
 		break;
 
 	case SCTP_DISPOSITION_CONSUME:
-	case SCTP_DISPOSITION_ABORT:
 		/*
 		 * We should no longer have much work to do here as the
 		 * real work has been done as explicit commands above.
@@ -1263,7 +1257,6 @@ static int sctp_cmd_interpreter(sctp_event_t event_type,
 			asoc = cmd->obj.asoc;
 			BUG_ON(asoc->peer.primary_path == NULL);
 			sctp_endpoint_add_asoc(ep, asoc);
-			sctp_hash_established(asoc);
 			break;
 
 		case SCTP_CMD_UPDATE_ASSOC:

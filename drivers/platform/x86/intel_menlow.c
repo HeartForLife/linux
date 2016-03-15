@@ -36,10 +36,8 @@
 #include <linux/types.h>
 #include <linux/pci.h>
 #include <linux/pm.h>
-
 #include <linux/thermal.h>
-#include <acpi/acpi_bus.h>
-#include <acpi/acpi_drivers.h>
+#include <linux/acpi.h>
 
 MODULE_AUTHOR("Thomas Sujith");
 MODULE_AUTHOR("Zhang Rui");
@@ -317,7 +315,7 @@ static ssize_t aux0_show(struct device *dev,
 
 	result = sensor_get_auxtrip(attr->handle, 0, &value);
 
-	return result ? result : sprintf(buf, "%lu", KELVIN_TO_CELSIUS(value));
+	return result ? result : sprintf(buf, "%lu", DECI_KELVIN_TO_CELSIUS(value));
 }
 
 static ssize_t aux1_show(struct device *dev,
@@ -329,7 +327,7 @@ static ssize_t aux1_show(struct device *dev,
 
 	result = sensor_get_auxtrip(attr->handle, 1, &value);
 
-	return result ? result : sprintf(buf, "%lu", KELVIN_TO_CELSIUS(value));
+	return result ? result : sprintf(buf, "%lu", DECI_KELVIN_TO_CELSIUS(value));
 }
 
 static ssize_t aux0_store(struct device *dev,
@@ -347,7 +345,7 @@ static ssize_t aux0_store(struct device *dev,
 	if (value < 0)
 		return -EINVAL;
 
-	result = sensor_set_auxtrip(attr->handle, 0, CELSIUS_TO_KELVIN(value));
+	result = sensor_set_auxtrip(attr->handle, 0, CELSIUS_TO_DECI_KELVIN(value));
 	return result ? result : count;
 }
 
@@ -366,7 +364,7 @@ static ssize_t aux1_store(struct device *dev,
 	if (value < 0)
 		return -EINVAL;
 
-	result = sensor_set_auxtrip(attr->handle, 1, CELSIUS_TO_KELVIN(value));
+	result = sensor_set_auxtrip(attr->handle, 1, CELSIUS_TO_DECI_KELVIN(value));
 	return result ? result : count;
 }
 

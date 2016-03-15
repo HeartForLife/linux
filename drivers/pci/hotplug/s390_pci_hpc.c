@@ -7,15 +7,14 @@
  *   Jan Glauber <jang@linux.vnet.ibm.com>
  */
 
-#define COMPONENT "zPCI hpc"
-#define pr_fmt(fmt) COMPONENT ": " fmt
+#define KMSG_COMPONENT "zpci"
+#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
 
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/pci.h>
 #include <linux/pci_hotplug.h>
-#include <linux/init.h>
 #include <asm/pci_debug.h>
 #include <asm/sclp.h>
 
@@ -80,7 +79,9 @@ static int enable_slot(struct hotplug_slot *hotplug_slot)
 		goto out_deconfigure;
 
 	pci_scan_slot(slot->zdev->bus, ZPCI_DEVFN);
+	pci_lock_rescan_remove();
 	pci_bus_add_devices(slot->zdev->bus);
+	pci_unlock_rescan_remove();
 
 	return rc;
 
@@ -98,7 +99,7 @@ static int disable_slot(struct hotplug_slot *hotplug_slot)
 		return -EIO;
 
 	if (slot->zdev->pdev)
-		pci_stop_and_remove_bus_device(slot->zdev->pdev);
+		pci_stop_and_remove_bus_device_locked(slot->zdev->pdev);
 
 	rc = zpci_disable_device(slot->zdev);
 	if (rc)
@@ -200,11 +201,10 @@ error:
 
 void zpci_exit_slot(struct zpci_dev *zdev)
 {
-	struct list_head *tmp, *n;
-	struct slot *slot;
+	struct slot *slot, *next;
 
-	list_for_each_safe(tmp, n, &s390_hotplug_slot_list) {
-		slot = list_entry(tmp, struct slot, slot_list);
+	list_for_each_entry_safe(slot, next, &s390_hotplug_slot_list,
+				 slot_list) {
 		if (slot->zdev != zdev)
 			continue;
 		list_del(&slot->slot_list);

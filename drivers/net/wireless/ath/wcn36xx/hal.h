@@ -345,6 +345,8 @@ enum wcn36xx_hal_host_msg_type {
 	WCN36XX_HAL_DHCP_START_IND = 189,
 	WCN36XX_HAL_DHCP_STOP_IND = 190,
 
+	WCN36XX_HAL_AVOID_FREQ_RANGE_IND = 233,
+
 	WCN36XX_HAL_MSG_MAX = WCN36XX_HAL_MSG_TYPE_MAX_ENUM_SIZE
 };
 
@@ -2644,7 +2646,7 @@ struct wcn36xx_hal_trigger_ba_rsp_candidate {
 	struct add_ba_info ba_info[STACFG_MAX_TC];
 } __packed;
 
-struct wcn36xx_hal_trigget_ba_req_candidate {
+struct wcn36xx_hal_trigger_ba_req_candidate {
 	u8 sta_index;
 	u8 tid_bitmap;
 } __packed;
@@ -4384,11 +4386,13 @@ enum place_holder_in_cap_bitmap {
 	MAX_FEATURE_SUPPORTED = 128,
 };
 
+#define WCN36XX_HAL_CAPS_SIZE 4
+
 struct wcn36xx_hal_feat_caps_msg {
 
 	struct wcn36xx_hal_msg_header header;
 
-	u32 feat_caps[4];
+	u32 feat_caps[WCN36XX_HAL_CAPS_SIZE];
 } __packed;
 
 /* status codes to help debug rekey failures */

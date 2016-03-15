@@ -14,7 +14,6 @@
 
 #include <linux/module.h>
 #include <linux/uaccess.h>
-#include <linux/init.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
@@ -115,7 +114,6 @@
  * @phy_dev:		pointer to the PHY device
  * @phy_node:		pointer to the PHY device node
  * @mii_bus:		pointer to the MII bus
- * @mdio_irqs:		IRQs table for MDIO bus
  * @last_link:		last link status
  * @has_mdio:		indicates whether MDIO is included in the HW
  */
@@ -136,7 +134,6 @@ struct net_local {
 	struct device_node *phy_node;
 
 	struct mii_bus *mii_bus;
-	int mdio_irqs[PHY_MAX_ADDR];
 
 	int last_link;
 	bool has_mdio;
@@ -163,25 +160,8 @@ static void xemaclite_enable_interrupts(struct net_local *drvdata)
 	__raw_writel(reg_data | XEL_TSR_XMIT_IE_MASK,
 		     drvdata->base_addr + XEL_TSR_OFFSET);
 
-	/* Enable the Tx interrupts for the second Buffer if
-	 * configured in HW */
-	if (drvdata->tx_ping_pong != 0) {
-		reg_data = __raw_readl(drvdata->base_addr +
-				   XEL_BUFFER_OFFSET + XEL_TSR_OFFSET);
-		__raw_writel(reg_data | XEL_TSR_XMIT_IE_MASK,
-			     drvdata->base_addr + XEL_BUFFER_OFFSET +
-			     XEL_TSR_OFFSET);
-	}
-
 	/* Enable the Rx interrupts for the first buffer */
 	__raw_writel(XEL_RSR_RECV_IE_MASK, drvdata->base_addr + XEL_RSR_OFFSET);
-
-	/* Enable the Rx interrupts for the second Buffer if
-	 * configured in HW */
-	if (drvdata->rx_ping_pong != 0) {
-		__raw_writel(XEL_RSR_RECV_IE_MASK, drvdata->base_addr +
-			     XEL_BUFFER_OFFSET + XEL_RSR_OFFSET);
-	}
 
 	/* Enable the Global Interrupt Enable */
 	__raw_writel(XEL_GIER_GIE_MASK, drvdata->base_addr + XEL_GIER_OFFSET);
@@ -206,31 +186,10 @@ static void xemaclite_disable_interrupts(struct net_local *drvdata)
 	__raw_writel(reg_data & (~XEL_TSR_XMIT_IE_MASK),
 		     drvdata->base_addr + XEL_TSR_OFFSET);
 
-	/* Disable the Tx interrupts for the second Buffer
-	 * if configured in HW */
-	if (drvdata->tx_ping_pong != 0) {
-		reg_data = __raw_readl(drvdata->base_addr + XEL_BUFFER_OFFSET +
-				   XEL_TSR_OFFSET);
-		__raw_writel(reg_data & (~XEL_TSR_XMIT_IE_MASK),
-			     drvdata->base_addr + XEL_BUFFER_OFFSET +
-			     XEL_TSR_OFFSET);
-	}
-
 	/* Disable the Rx interrupts for the first buffer */
 	reg_data = __raw_readl(drvdata->base_addr + XEL_RSR_OFFSET);
 	__raw_writel(reg_data & (~XEL_RSR_RECV_IE_MASK),
 		     drvdata->base_addr + XEL_RSR_OFFSET);
-
-	/* Disable the Rx interrupts for the second buffer
-	 * if configured in HW */
-	if (drvdata->rx_ping_pong != 0) {
-
-		reg_data = __raw_readl(drvdata->base_addr + XEL_BUFFER_OFFSET +
-				   XEL_RSR_OFFSET);
-		__raw_writel(reg_data & (~XEL_RSR_RECV_IE_MASK),
-			     drvdata->base_addr + XEL_BUFFER_OFFSET +
-			     XEL_RSR_OFFSET);
-	}
 }
 
 /**
@@ -258,6 +217,13 @@ static void xemaclite_aligned_write(void *src_ptr, u32 *dest_ptr,
 		*to_u16_ptr++ = *from_u16_ptr++;
 		*to_u16_ptr++ = *from_u16_ptr++;
 
+		/* This barrier resolves occasional issues seen around
+		 * cases where the data is not properly flushed out
+		 * from the processor store buffers to the destination
+		 * memory locations.
+		 */
+		wmb();
+
 		/* Output a word */
 		*to_u32_ptr++ = align_buffer;
 	}
@@ -273,6 +239,12 @@ static void xemaclite_aligned_write(void *src_ptr, u32 *dest_ptr,
 		for (; length > 0; length--)
 			*to_u8_ptr++ = *from_u8_ptr++;
 
+		/* This barrier resolves occasional issues seen around
+		 * cases where the data is not properly flushed out
+		 * from the processor store buffers to the destination
+		 * memory locations.
+		 */
+		wmb();
 		*to_u32_ptr = align_buffer;
 	}
 }
@@ -721,14 +693,14 @@ static irqreturn_t xemaclite_interrupt(int irq, void *dev_id)
 
 static int xemaclite_mdio_wait(struct net_local *lp)
 {
-	long end = jiffies + 2;
+	unsigned long end = jiffies + 2;
 
 	/* wait for the MDIO interface to not be busy or timeout
 	   after some time.
 	*/
 	while (__raw_readl(lp->base_addr + XEL_MDIOCTRL_OFFSET) &
 			XEL_MDIOCTRL_MDIOSTS_MASK) {
-		if (end - jiffies <= 0) {
+		if (time_before_eq(end, jiffies)) {
 			WARN_ON(1);
 			return -ETIMEDOUT;
 		}
@@ -821,18 +793,6 @@ static int xemaclite_mdio_write(struct mii_bus *bus, int phy_id, int reg,
 }
 
 /**
- * xemaclite_mdio_reset - Reset the mdio bus.
- * @bus:	Pointer to the MII bus
- *
- * This function is required(?) as per Documentation/networking/phy.txt.
- * There is no reset in this device; this function always returns 0.
- */
-static int xemaclite_mdio_reset(struct mii_bus *bus)
-{
-	return 0;
-}
-
-/**
  * xemaclite_mdio_setup - Register mii_bus for the Emaclite device
  * @lp:		Pointer to the Emaclite device private data
  * @ofdev:	Pointer to OF device structure
@@ -866,6 +826,8 @@ static int xemaclite_mdio_setup(struct net_local *lp, struct device *dev)
 		if (!phydev)
 			dev_info(dev,
 				 "MDIO of the phy is not registered yet\n");
+		else
+			put_device(&phydev->mdio.dev);
 		return 0;
 	}
 
@@ -887,9 +849,7 @@ static int xemaclite_mdio_setup(struct net_local *lp, struct device *dev)
 	bus->name = "Xilinx Emaclite MDIO";
 	bus->read = xemaclite_mdio_read;
 	bus->write = xemaclite_mdio_write;
-	bus->reset = xemaclite_mdio_reset;
 	bus->parent = dev;
-	bus->irq = lp->mdio_irqs; /* preallocated IRQ table */
 
 	lp->mii_bus = bus;
 
@@ -1063,7 +1023,7 @@ static int xemaclite_send(struct sk_buff *orig_skb, struct net_device *dev)
 	skb_tx_timestamp(new_skb);
 
 	dev->stats.tx_bytes += len;
-	dev_kfree_skb(new_skb);
+	dev_consume_skb_any(new_skb);
 
 	return 0;
 }
@@ -1101,7 +1061,7 @@ static bool get_bool(struct platform_device *ofdev, const char *s)
 	} else {
 		dev_warn(&ofdev->dev, "Parameter %s not found,"
 			"defaulting to false\n", s);
-		return 0;
+		return false;
 	}
 }
 
@@ -1148,6 +1108,7 @@ static int xemaclite_of_probe(struct platform_device *ofdev)
 	res = platform_get_resource(ofdev, IORESOURCE_IRQ, 0);
 	if (!res) {
 		dev_err(dev, "no IRQ found\n");
+		rc = -ENXIO;
 		goto error;
 	}
 
@@ -1232,15 +1193,13 @@ static int xemaclite_of_remove(struct platform_device *of_dev)
 	/* Un-register the mii_bus, if configured */
 	if (lp->has_mdio) {
 		mdiobus_unregister(lp->mii_bus);
-		kfree(lp->mii_bus->irq);
 		mdiobus_free(lp->mii_bus);
 		lp->mii_bus = NULL;
 	}
 
 	unregister_netdev(ndev);
 
-	if (lp->phy_node)
-		of_node_put(lp->phy_node);
+	of_node_put(lp->phy_node);
 	lp->phy_node = NULL;
 
 	xemaclite_remove_ndev(ndev);
@@ -1270,7 +1229,7 @@ static struct net_device_ops xemaclite_netdev_ops = {
 };
 
 /* Match table for OF platform binding */
-static struct of_device_id xemaclite_of_match[] = {
+static const struct of_device_id xemaclite_of_match[] = {
 	{ .compatible = "xlnx,opb-ethernetlite-1.01.a", },
 	{ .compatible = "xlnx,opb-ethernetlite-1.01.b", },
 	{ .compatible = "xlnx,xps-ethernetlite-1.00.a", },
@@ -1284,7 +1243,6 @@ MODULE_DEVICE_TABLE(of, xemaclite_of_match);
 static struct platform_driver xemaclite_of_driver = {
 	.driver = {
 		.name = DRIVER_NAME,
-		.owner = THIS_MODULE,
 		.of_match_table = xemaclite_of_match,
 	},
 	.probe		= xemaclite_of_probe,

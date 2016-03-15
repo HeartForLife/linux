@@ -2,6 +2,9 @@
 # General architecture dependent options
 #
 
+config KEXEC_CORE
+	bool
+
 config OPROFILE
 	tristate "OProfile system profiling"
 	depends on PROFILING
@@ -32,7 +35,7 @@ config HAVE_OPROFILE
 
 config OPROFILE_NMI_TIMER
 	def_bool y
-	depends on PERF_EVENTS && HAVE_PERF_EVENTS_NMI
+	depends on PERF_EVENTS && HAVE_PERF_EVENTS_NMI && !PPC64
 
 config KPROBES
 	bool "Kprobes"
@@ -71,6 +74,12 @@ config JUMP_LABEL
 	 ( On 32-bit x86, the necessary options added to the compiler
 	   flags may increase the size of the kernel slightly. )
 
+config STATIC_KEYS_SELFTEST
+	bool "Static key selftest"
+	depends on JUMP_LABEL
+	help
+	  Boot time self-test of the branch patching code.
+
 config OPTPROBES
 	def_bool y
 	depends on KPROBES && HAVE_OPTPROBES
@@ -86,10 +95,7 @@ config KPROBES_ON_FTRACE
 	 optimize on top of function tracing.
 
 config UPROBES
-	bool "Transparent user-space probes (EXPERIMENTAL)"
-	depends on UPROBE_EVENT && PERF_EVENTS
-	default n
-	select PERCPU_RWSEM
+	def_bool n
 	help
 	  Uprobes is the user-space counterpart to kprobes: they
 	  enable instrumentation applications (such as 'perf probe')
@@ -100,8 +106,6 @@ config UPROBES
 	  ( These probes come in the form of single-byte breakpoints,
 	    managed by the kernel and kept transparent to the probed
 	    application. )
-
-	  If in doubt, say "N".
 
 config HAVE_64BIT_ALIGNED_ACCESS
 	def_bool 64BIT && !HAVE_EFFICIENT_UNALIGNED_ACCESS
@@ -201,9 +205,6 @@ config HAVE_NMI_WATCHDOG
 config HAVE_ARCH_TRACEHOOK
 	bool
 
-config HAVE_DMA_ATTRS
-	bool
-
 config HAVE_DMA_CONTIGUOUS
 	bool
 
@@ -223,6 +224,10 @@ config ARCH_TASK_STRUCT_ALLOCATOR
 
 # Select if arch has its private alloc_thread_info() function
 config ARCH_THREAD_INFO_ALLOCATOR
+	bool
+
+# Select if arch wants to size task_struct dynamically via arch_task_struct_size:
+config ARCH_WANTS_DYNAMIC_TASK_STRUCT
 	bool
 
 config HAVE_REGS_AND_STACK_ACCESS_API
@@ -325,6 +330,18 @@ config HAVE_ARCH_SECCOMP_FILTER
 	  - secure_computing is called from a ptrace_event()-safe context
 	  - secure_computing return value is checked and a return value of -1
 	    results in the system call being skipped immediately.
+	  - seccomp syscall wired up
+
+	  For best performance, an arch should use seccomp_phase1 and
+	  seccomp_phase2 directly.  It should call seccomp_phase1 for all
+	  syscalls if TIF_SECCOMP is set, but seccomp_phase1 does not
+	  need to be called from a ptrace-safe context.  It must then
+	  call seccomp_phase2 if seccomp_phase1 returns anything other
+	  than SECCOMP_PHASE1_OK or SECCOMP_PHASE1_SKIP.
+
+	  As an additional optimization, an arch may provide seccomp_data
+	  directly to seccomp_phase1; this avoids multiple calls
+	  to the syscall_xyz helpers for every syscall.
 
 config SECCOMP_FILTER
 	def_bool y
@@ -335,6 +352,73 @@ config SECCOMP_FILTER
 	  task-defined system call filtering polices.
 
 	  See Documentation/prctl/seccomp_filter.txt for details.
+
+config HAVE_CC_STACKPROTECTOR
+	bool
+	help
+	  An arch should select this symbol if:
+	  - its compiler supports the -fstack-protector option
+	  - it has implemented a stack canary (e.g. __stack_chk_guard)
+
+config CC_STACKPROTECTOR
+	def_bool n
+	help
+	  Set when a stack-protector mode is enabled, so that the build
+	  can enable kernel-side support for the GCC feature.
+
+choice
+	prompt "Stack Protector buffer overflow detection"
+	depends on HAVE_CC_STACKPROTECTOR
+	default CC_STACKPROTECTOR_NONE
+	help
+	  This option turns on the "stack-protector" GCC feature. This
+	  feature puts, at the beginning of functions, a canary value on
+	  the stack just before the return address, and validates
+	  the value just before actually returning.  Stack based buffer
+	  overflows (that need to overwrite this return address) now also
+	  overwrite the canary, which gets detected and the attack is then
+	  neutralized via a kernel panic.
+
+config CC_STACKPROTECTOR_NONE
+	bool "None"
+	help
+	  Disable "stack-protector" GCC feature.
+
+config CC_STACKPROTECTOR_REGULAR
+	bool "Regular"
+	select CC_STACKPROTECTOR
+	help
+	  Functions will have the stack-protector canary logic added if they
+	  have an 8-byte or larger character array on the stack.
+
+	  This feature requires gcc version 4.2 or above, or a distribution
+	  gcc with the feature backported ("-fstack-protector").
+
+	  On an x86 "defconfig" build, this feature adds canary checks to
+	  about 3% of all kernel functions, which increases kernel code size
+	  by about 0.3%.
+
+config CC_STACKPROTECTOR_STRONG
+	bool "Strong"
+	select CC_STACKPROTECTOR
+	help
+	  Functions will have the stack-protector canary logic added in any
+	  of the following conditions:
+
+	  - local variable's address used as part of the right hand side of an
+	    assignment or function argument
+	  - local variable is an array (or union containing an array),
+	    regardless of array type or length
+	  - uses register local variables
+
+	  This feature requires gcc version 4.9 or above, or a distribution
+	  gcc with the feature backported ("-fstack-protector-strong").
+
+	  On an x86 "defconfig" build, this feature adds canary checks to
+	  about 20% of all kernel functions, which increases the kernel code
+	  size by about 2%.
+
+endchoice
 
 config HAVE_CONTEXT_TRACKING
 	bool
@@ -369,6 +453,9 @@ config HAVE_IRQ_TIME_ACCOUNTING
 	  support irq time accounting and then call enable_sched_clock_irqtime().
 
 config HAVE_ARCH_TRANSPARENT_HUGEPAGE
+	bool
+
+config HAVE_ARCH_HUGE_VMAP
 	bool
 
 config HAVE_ARCH_SOFT_DIRTY
@@ -408,6 +495,93 @@ config HAVE_IRQ_EXIT_ON_IRQ_STACK
 	  in the end of an hardirq.
 	  This spares a stack switch and improves cache usage on softirq
 	  processing.
+
+config PGTABLE_LEVELS
+	int
+	default 2
+
+config ARCH_HAS_ELF_RANDOMIZE
+	bool
+	help
+	  An architecture supports choosing randomized locations for
+	  stack, mmap, brk, and ET_DYN. Defined functions:
+	  - arch_mmap_rnd()
+	  - arch_randomize_brk()
+
+config HAVE_ARCH_MMAP_RND_BITS
+	bool
+	help
+	  An arch should select this symbol if it supports setting a variable
+	  number of bits for use in establishing the base address for mmap
+	  allocations, has MMU enabled and provides values for both:
+	  - ARCH_MMAP_RND_BITS_MIN
+	  - ARCH_MMAP_RND_BITS_MAX
+
+config ARCH_MMAP_RND_BITS_MIN
+	int
+
+config ARCH_MMAP_RND_BITS_MAX
+	int
+
+config ARCH_MMAP_RND_BITS_DEFAULT
+	int
+
+config ARCH_MMAP_RND_BITS
+	int "Number of bits to use for ASLR of mmap base address" if EXPERT
+	range ARCH_MMAP_RND_BITS_MIN ARCH_MMAP_RND_BITS_MAX
+	default ARCH_MMAP_RND_BITS_DEFAULT if ARCH_MMAP_RND_BITS_DEFAULT
+	default ARCH_MMAP_RND_BITS_MIN
+	depends on HAVE_ARCH_MMAP_RND_BITS
+	help
+	  This value can be used to select the number of bits to use to
+	  determine the random offset to the base address of vma regions
+	  resulting from mmap allocations. This value will be bounded
+	  by the architecture's minimum and maximum supported values.
+
+	  This value can be changed after boot using the
+	  /proc/sys/vm/mmap_rnd_bits tunable
+
+config HAVE_ARCH_MMAP_RND_COMPAT_BITS
+	bool
+	help
+	  An arch should select this symbol if it supports running applications
+	  in compatibility mode, supports setting a variable number of bits for
+	  use in establishing the base address for mmap allocations, has MMU
+	  enabled and provides values for both:
+	  - ARCH_MMAP_RND_COMPAT_BITS_MIN
+	  - ARCH_MMAP_RND_COMPAT_BITS_MAX
+
+config ARCH_MMAP_RND_COMPAT_BITS_MIN
+	int
+
+config ARCH_MMAP_RND_COMPAT_BITS_MAX
+	int
+
+config ARCH_MMAP_RND_COMPAT_BITS_DEFAULT
+	int
+
+config ARCH_MMAP_RND_COMPAT_BITS
+	int "Number of bits to use for ASLR of mmap base address for compatible applications" if EXPERT
+	range ARCH_MMAP_RND_COMPAT_BITS_MIN ARCH_MMAP_RND_COMPAT_BITS_MAX
+	default ARCH_MMAP_RND_COMPAT_BITS_DEFAULT if ARCH_MMAP_RND_COMPAT_BITS_DEFAULT
+	default ARCH_MMAP_RND_COMPAT_BITS_MIN
+	depends on HAVE_ARCH_MMAP_RND_COMPAT_BITS
+	help
+	  This value can be used to select the number of bits to use to
+	  determine the random offset to the base address of vma regions
+	  resulting from mmap allocations for compatible applications This
+	  value will be bounded by the architecture's minimum and maximum
+	  supported values.
+
+	  This value can be changed after boot using the
+	  /proc/sys/vm/mmap_rnd_compat_bits tunable
+
+config HAVE_COPY_THREAD_TLS
+	bool
+	help
+	  Architecture provides copy_thread_tls to accept tls argument via
+	  normal C parameter passing, rather than extracting the syscall
+	  argument from pt_regs.
 
 #
 # ABI hall of shame
@@ -453,6 +627,9 @@ config OLD_SIGACTION
 	  compatibility...
 
 config COMPAT_OLD_SIGACTION
+	bool
+
+config ARCH_NO_COHERENT_DMA_MMAP
 	bool
 
 source "kernel/gcov/Kconfig"

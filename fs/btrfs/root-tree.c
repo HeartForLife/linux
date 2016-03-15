@@ -16,6 +16,7 @@
  * Boston, MA 021110-1307, USA.
  */
 
+#include <linux/err.h>
 #include <linux/uuid.h>
 #include "ctree.h"
 #include "transaction.h"
@@ -44,12 +45,13 @@ static void btrfs_read_root_item(struct extent_buffer *eb, int slot,
 	if (!need_reset && btrfs_root_generation(item)
 		!= btrfs_root_generation_v2(item)) {
 		if (btrfs_root_generation_v2(item) != 0) {
-			printk(KERN_WARNING "btrfs: mismatching "
+			btrfs_warn(eb->fs_info,
+					"mismatching "
 					"generation and generation_v2 "
 					"found in root item. This root "
 					"was probably mounted with an "
 					"older kernel. Resetting all "
-					"new fields.\n");
+					"new fields.");
 		}
 		need_reset = 1;
 	}
@@ -140,7 +142,7 @@ int btrfs_update_root(struct btrfs_trans_handle *trans, struct btrfs_root
 	int ret;
 	int slot;
 	unsigned long ptr;
-	int old_len;
+	u32 old_len;
 
 	path = btrfs_alloc_path();
 	if (!path)
@@ -154,7 +156,7 @@ int btrfs_update_root(struct btrfs_trans_handle *trans, struct btrfs_root
 
 	if (ret != 0) {
 		btrfs_print_leaf(root, path->nodes[0]);
-		printk(KERN_CRIT "unable to update root key %llu %u %llu\n",
+		btrfs_crit(root->fs_info, "unable to update root key %llu %u %llu",
 		       key->objectid, key->type, key->offset);
 		BUG_ON(1);
 	}
@@ -271,7 +273,7 @@ int btrfs_find_orphan_roots(struct btrfs_root *tree_root)
 		key.offset++;
 
 		root = btrfs_read_fs_root(tree_root, &root_key);
-		err = PTR_RET(root);
+		err = PTR_ERR_OR_ZERO(root);
 		if (err && err != -ENOENT) {
 			break;
 		} else if (err == -ENOENT) {
@@ -282,7 +284,7 @@ int btrfs_find_orphan_roots(struct btrfs_root *tree_root)
 			trans = btrfs_join_transaction(tree_root);
 			if (IS_ERR(trans)) {
 				err = PTR_ERR(trans);
-				btrfs_error(tree_root->fs_info, err,
+				btrfs_std_error(tree_root->fs_info, err,
 					    "Failed to start trans to delete "
 					    "orphan item");
 				break;
@@ -291,7 +293,7 @@ int btrfs_find_orphan_roots(struct btrfs_root *tree_root)
 						    root_key.objectid);
 			btrfs_end_transaction(trans, tree_root);
 			if (err) {
-				btrfs_error(tree_root->fs_info, err,
+				btrfs_std_error(tree_root->fs_info, err,
 					    "Failed to delete root orphan "
 					    "item");
 				break;
@@ -305,11 +307,19 @@ int btrfs_find_orphan_roots(struct btrfs_root *tree_root)
 			break;
 		}
 
-		root->orphan_item_inserted = 1;
+		set_bit(BTRFS_ROOT_ORPHAN_ITEM_INSERTED, &root->state);
 
 		err = btrfs_insert_fs_root(root->fs_info, root);
+		/*
+		 * The root might have been inserted already, as before we look
+		 * for orphan roots, log replay might have happened, which
+		 * triggers a transaction commit and qgroup accounting, which
+		 * in turn reads and inserts fs roots while doing backref
+		 * walking.
+		 */
+		if (err == -EEXIST)
+			err = 0;
 		if (err) {
-			BUG_ON(err == -EEXIST);
 			btrfs_free_fs_root(root);
 			break;
 		}
@@ -398,21 +408,6 @@ again:
 out:
 	btrfs_free_path(path);
 	return err;
-}
-
-int btrfs_find_root_ref(struct btrfs_root *tree_root,
-		   struct btrfs_path *path,
-		   u64 root_id, u64 ref_id)
-{
-	struct btrfs_key key;
-	int ret;
-
-	key.objectid = root_id;
-	key.type = BTRFS_ROOT_REF_KEY;
-	key.offset = ref_id;
-
-	ret = btrfs_search_slot(NULL, tree_root, &key, path, 0, 0);
-	return ret;
 }
 
 /*

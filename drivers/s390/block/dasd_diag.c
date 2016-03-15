@@ -21,6 +21,7 @@
 
 #include <asm/dasd.h>
 #include <asm/debug.h>
+#include <asm/diag.h>
 #include <asm/ebcdic.h>
 #include <asm/io.h>
 #include <asm/irq.h>
@@ -66,7 +67,7 @@ static const u8 DASD_DIAG_CMS1[] = { 0xc3, 0xd4, 0xe2, 0xf1 };/* EBCDIC CMS1 */
  * and function code cmd.
  * In case of an exception return 3. Otherwise return result of bitwise OR of
  * resulting condition code and DIAG return code. */
-static inline int dia250(void *iob, int cmd)
+static inline int __dia250(void *iob, int cmd)
 {
 	register unsigned long reg2 asm ("2") = (unsigned long) iob;
 	typedef union {
@@ -87,6 +88,12 @@ static inline int dia250(void *iob, int cmd)
 		: "d" (cmd), "d" (reg2), "m" (*(addr_type *) iob)
 		: "3", "cc");
 	return rc;
+}
+
+static inline int dia250(void *iob, int cmd)
+{
+	diag_stat_inc(DIAG_STAT_X250);
+	return __dia250(iob, cmd);
 }
 
 /* Initialize block I/O to DIAG device using the specified blocksize and
@@ -504,7 +511,7 @@ static struct dasd_ccw_req *dasd_diag_build_cp(struct dasd_device *memdev,
 	struct dasd_diag_req *dreq;
 	struct dasd_diag_bio *dbio;
 	struct req_iterator iter;
-	struct bio_vec *bv;
+	struct bio_vec bv;
 	char *dst;
 	unsigned int count, datasize;
 	sector_t recid, first_rec, last_rec;
@@ -525,10 +532,10 @@ static struct dasd_ccw_req *dasd_diag_build_cp(struct dasd_device *memdev,
 	/* Check struct bio and count the number of blocks for the request. */
 	count = 0;
 	rq_for_each_segment(bv, req, iter) {
-		if (bv->bv_len & (blksize - 1))
+		if (bv.bv_len & (blksize - 1))
 			/* Fba can only do full blocks. */
 			return ERR_PTR(-EINVAL);
-		count += bv->bv_len >> (block->s2b_shift + 9);
+		count += bv.bv_len >> (block->s2b_shift + 9);
 	}
 	/* Paranoia. */
 	if (count != last_rec - first_rec + 1)
@@ -545,8 +552,8 @@ static struct dasd_ccw_req *dasd_diag_build_cp(struct dasd_device *memdev,
 	dbio = dreq->bio;
 	recid = first_rec;
 	rq_for_each_segment(bv, req, iter) {
-		dst = page_address(bv->bv_page) + bv->bv_offset;
-		for (off = 0; off < bv->bv_len; off += blksize) {
+		dst = page_address(bv.bv_page) + bv.bv_offset;
+		for (off = 0; off < bv.bv_len; off += blksize) {
 			memset(dbio, 0, sizeof (struct dasd_diag_bio));
 			dbio->type = rw_cmd;
 			dbio->block_number = recid + 1;
@@ -646,7 +653,7 @@ dasd_diag_init(void)
 	ASCEBC(dasd_diag_discipline.ebcname, 4);
 
 	irq_subclass_register(IRQ_SUBCLASS_SERVICE_SIGNAL);
-	register_external_interrupt(0x2603, dasd_ext_handler);
+	register_external_irq(EXT_IRQ_CP_SERVICE, dasd_ext_handler);
 	dasd_diag_discipline_pointer = &dasd_diag_discipline;
 	return 0;
 }
@@ -654,7 +661,7 @@ dasd_diag_init(void)
 static void __exit
 dasd_diag_cleanup(void)
 {
-	unregister_external_interrupt(0x2603, dasd_ext_handler);
+	unregister_external_irq(EXT_IRQ_CP_SERVICE, dasd_ext_handler);
 	irq_subclass_unregister(IRQ_SUBCLASS_SERVICE_SIGNAL);
 	dasd_diag_discipline_pointer = NULL;
 }

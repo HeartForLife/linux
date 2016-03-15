@@ -1,4 +1,5 @@
 #include <linux/module.h>
+
 #include <linux/moduleparam.h>
 #include <linux/sched.h>
 #include <linux/fs.h>
@@ -7,6 +8,7 @@
 #include <linux/slab.h>
 #include <linux/blk-mq.h>
 #include <linux/hrtimer.h>
+#include <linux/lightnvm.h>
 
 struct nullb_cmd {
 	struct list_head list;
@@ -16,6 +18,7 @@ struct nullb_cmd {
 	struct bio *bio;
 	unsigned int tag;
 	struct nullb_queue *nq;
+	struct hrtimer timer;
 };
 
 struct nullb_queue {
@@ -31,41 +34,35 @@ struct nullb {
 	unsigned int index;
 	struct request_queue *q;
 	struct gendisk *disk;
+	struct blk_mq_tag_set tag_set;
 	struct hrtimer timer;
 	unsigned int queue_depth;
 	spinlock_t lock;
 
 	struct nullb_queue *queues;
 	unsigned int nr_queues;
+	char disk_name[DISK_NAME_LEN];
 };
 
 static LIST_HEAD(nullb_list);
 static struct mutex lock;
 static int null_major;
 static int nullb_indexes;
-
-struct completion_queue {
-	struct llist_head list;
-	struct hrtimer timer;
-};
-
-/*
- * These are per-cpu for now, they will need to be configured by the
- * complete_queues parameter and appropriately mapped.
- */
-static DEFINE_PER_CPU(struct completion_queue, completion_queues);
+static struct kmem_cache *ppa_cache;
 
 enum {
 	NULL_IRQ_NONE		= 0,
 	NULL_IRQ_SOFTIRQ	= 1,
 	NULL_IRQ_TIMER		= 2,
+};
 
+enum {
 	NULL_Q_BIO		= 0,
 	NULL_Q_RQ		= 1,
 	NULL_Q_MQ		= 2,
 };
 
-static int submit_queues = 1;
+static int submit_queues;
 module_param(submit_queues, int, S_IRUGO);
 MODULE_PARM_DESC(submit_queues, "Number of submission queues");
 
@@ -74,8 +71,34 @@ module_param(home_node, int, S_IRUGO);
 MODULE_PARM_DESC(home_node, "Home node for the device");
 
 static int queue_mode = NULL_Q_MQ;
-module_param(queue_mode, int, S_IRUGO);
-MODULE_PARM_DESC(use_mq, "Use blk-mq interface (0=bio,1=rq,2=multiqueue)");
+
+static int null_param_store_val(const char *str, int *val, int min, int max)
+{
+	int ret, new_val;
+
+	ret = kstrtoint(str, 10, &new_val);
+	if (ret)
+		return -EINVAL;
+
+	if (new_val < min || new_val > max)
+		return -EINVAL;
+
+	*val = new_val;
+	return 0;
+}
+
+static int null_set_queue_mode(const char *str, const struct kernel_param *kp)
+{
+	return null_param_store_val(str, &queue_mode, NULL_Q_BIO, NULL_Q_MQ);
+}
+
+static const struct kernel_param_ops null_queue_mode_param_ops = {
+	.set	= null_set_queue_mode,
+	.get	= param_get_int,
+};
+
+device_param_cb(queue_mode, &null_queue_mode_param_ops, &queue_mode, S_IRUGO);
+MODULE_PARM_DESC(queue_mode, "Block interface to use (0=bio,1=rq,2=multiqueue)");
 
 static int gb = 250;
 module_param(gb, int, S_IRUGO);
@@ -89,21 +112,37 @@ static int nr_devices = 2;
 module_param(nr_devices, int, S_IRUGO);
 MODULE_PARM_DESC(nr_devices, "Number of devices to register");
 
+static bool use_lightnvm;
+module_param(use_lightnvm, bool, S_IRUGO);
+MODULE_PARM_DESC(use_lightnvm, "Register as a LightNVM device");
+
 static int irqmode = NULL_IRQ_SOFTIRQ;
-module_param(irqmode, int, S_IRUGO);
+
+static int null_set_irqmode(const char *str, const struct kernel_param *kp)
+{
+	return null_param_store_val(str, &irqmode, NULL_IRQ_NONE,
+					NULL_IRQ_TIMER);
+}
+
+static const struct kernel_param_ops null_irqmode_param_ops = {
+	.set	= null_set_irqmode,
+	.get	= param_get_int,
+};
+
+device_param_cb(irqmode, &null_irqmode_param_ops, &irqmode, S_IRUGO);
 MODULE_PARM_DESC(irqmode, "IRQ completion handler. 0-none, 1-softirq, 2-timer");
 
-static int completion_nsec = 10000;
-module_param(completion_nsec, int, S_IRUGO);
+static unsigned long completion_nsec = 10000;
+module_param(completion_nsec, ulong, S_IRUGO);
 MODULE_PARM_DESC(completion_nsec, "Time in ns to complete a request in hardware. Default: 10,000ns");
 
 static int hw_queue_depth = 64;
 module_param(hw_queue_depth, int, S_IRUGO);
 MODULE_PARM_DESC(hw_queue_depth, "Queue depth for each hardware queue. Default: 64");
 
-static bool use_per_node_hctx = true;
+static bool use_per_node_hctx = false;
 module_param(use_per_node_hctx, bool, S_IRUGO);
-MODULE_PARM_DESC(use_per_node_hctx, "Use per-node allocation for hardware context queues. Default: true");
+MODULE_PARM_DESC(use_per_node_hctx, "Use per-node allocation for hardware context queues. Default: false");
 
 static void put_tag(struct nullb_queue *nq, unsigned int tag)
 {
@@ -131,6 +170,8 @@ static void free_cmd(struct nullb_cmd *cmd)
 	put_tag(cmd->nq, cmd->tag);
 }
 
+static enum hrtimer_restart null_cmd_timer_expired(struct hrtimer *timer);
+
 static struct nullb_cmd *__alloc_cmd(struct nullb_queue *nq)
 {
 	struct nullb_cmd *cmd;
@@ -141,6 +182,11 @@ static struct nullb_cmd *__alloc_cmd(struct nullb_queue *nq)
 		cmd = &nq->cmds[tag];
 		cmd->tag = tag;
 		cmd->nq = nq;
+		if (irqmode == NULL_IRQ_TIMER) {
+			hrtimer_init(&cmd->timer, CLOCK_MONOTONIC,
+				     HRTIMER_MODE_REL);
+			cmd->timer.function = null_cmd_timer_expired;
+		}
 		return cmd;
 	}
 
@@ -171,110 +217,80 @@ static struct nullb_cmd *alloc_cmd(struct nullb_queue *nq, int can_wait)
 
 static void end_cmd(struct nullb_cmd *cmd)
 {
-	if (cmd->rq) {
-		if (queue_mode == NULL_Q_MQ)
-			blk_mq_end_io(cmd->rq, 0);
-		else {
-			INIT_LIST_HEAD(&cmd->rq->queuelist);
-			blk_end_request_all(cmd->rq, 0);
-		}
-	} else if (cmd->bio)
-		bio_endio(cmd->bio, 0);
+	struct request_queue *q = NULL;
 
-	if (queue_mode != NULL_Q_MQ)
-		free_cmd(cmd);
+	if (cmd->rq)
+		q = cmd->rq->q;
+
+	switch (queue_mode)  {
+	case NULL_Q_MQ:
+		blk_mq_end_request(cmd->rq, 0);
+		return;
+	case NULL_Q_RQ:
+		INIT_LIST_HEAD(&cmd->rq->queuelist);
+		blk_end_request_all(cmd->rq, 0);
+		break;
+	case NULL_Q_BIO:
+		bio_endio(cmd->bio);
+		break;
+	}
+
+	free_cmd(cmd);
+
+	/* Restart queue if needed, as we are freeing a tag */
+	if (queue_mode == NULL_Q_RQ && blk_queue_stopped(q)) {
+		unsigned long flags;
+
+		spin_lock_irqsave(q->queue_lock, flags);
+		blk_start_queue_async(q);
+		spin_unlock_irqrestore(q->queue_lock, flags);
+	}
 }
 
 static enum hrtimer_restart null_cmd_timer_expired(struct hrtimer *timer)
 {
-	struct completion_queue *cq;
-	struct llist_node *entry;
-	struct nullb_cmd *cmd;
-
-	cq = &per_cpu(completion_queues, smp_processor_id());
-
-	while ((entry = llist_del_all(&cq->list)) != NULL) {
-		do {
-			cmd = container_of(entry, struct nullb_cmd, ll_list);
-			end_cmd(cmd);
-			entry = entry->next;
-		} while (entry);
-	}
+	end_cmd(container_of(timer, struct nullb_cmd, timer));
 
 	return HRTIMER_NORESTART;
 }
 
 static void null_cmd_end_timer(struct nullb_cmd *cmd)
 {
-	struct completion_queue *cq = &per_cpu(completion_queues, get_cpu());
+	ktime_t kt = ktime_set(0, completion_nsec);
 
-	cmd->ll_list.next = NULL;
-	if (llist_add(&cmd->ll_list, &cq->list)) {
-		ktime_t kt = ktime_set(0, completion_nsec);
-
-		hrtimer_start(&cq->timer, kt, HRTIMER_MODE_REL);
-	}
-
-	put_cpu();
+	hrtimer_start(&cmd->timer, kt, HRTIMER_MODE_REL);
 }
 
 static void null_softirq_done_fn(struct request *rq)
 {
-	blk_end_request_all(rq, 0);
+	if (queue_mode == NULL_Q_MQ)
+		end_cmd(blk_mq_rq_to_pdu(rq));
+	else
+		end_cmd(rq->special);
 }
-
-#ifdef CONFIG_SMP
-
-static void null_ipi_cmd_end_io(void *data)
-{
-	struct completion_queue *cq;
-	struct llist_node *entry, *next;
-	struct nullb_cmd *cmd;
-
-	cq = &per_cpu(completion_queues, smp_processor_id());
-
-	entry = llist_del_all(&cq->list);
-
-	while (entry) {
-		next = entry->next;
-		cmd = llist_entry(entry, struct nullb_cmd, ll_list);
-		end_cmd(cmd);
-		entry = next;
-	}
-}
-
-static void null_cmd_end_ipi(struct nullb_cmd *cmd)
-{
-	struct call_single_data *data = &cmd->csd;
-	int cpu = get_cpu();
-	struct completion_queue *cq = &per_cpu(completion_queues, cpu);
-
-	cmd->ll_list.next = NULL;
-
-	if (llist_add(&cmd->ll_list, &cq->list)) {
-		data->func = null_ipi_cmd_end_io;
-		data->flags = 0;
-		__smp_call_function_single(cpu, data, 0);
-	}
-
-	put_cpu();
-}
-
-#endif /* CONFIG_SMP */
 
 static inline void null_handle_cmd(struct nullb_cmd *cmd)
 {
 	/* Complete IO by inline, softirq or timer */
 	switch (irqmode) {
+	case NULL_IRQ_SOFTIRQ:
+		switch (queue_mode)  {
+		case NULL_Q_MQ:
+			blk_mq_complete_request(cmd->rq, cmd->rq->errors);
+			break;
+		case NULL_Q_RQ:
+			blk_complete_request(cmd->rq);
+			break;
+		case NULL_Q_BIO:
+			/*
+			 * XXX: no proper submitting cpu information available.
+			 */
+			end_cmd(cmd);
+			break;
+		}
+		break;
 	case NULL_IRQ_NONE:
 		end_cmd(cmd);
-		break;
-	case NULL_IRQ_SOFTIRQ:
-#ifdef CONFIG_SMP
-		null_cmd_end_ipi(cmd);
-#else
-		end_cmd(cmd);
-#endif
 		break;
 	case NULL_IRQ_TIMER:
 		null_cmd_end_timer(cmd);
@@ -292,7 +308,7 @@ static struct nullb_queue *nullb_to_queue(struct nullb *nullb)
 	return &nullb->queues[index];
 }
 
-static void null_queue_bio(struct request_queue *q, struct bio *bio)
+static blk_qc_t null_queue_bio(struct request_queue *q, struct bio *bio)
 {
 	struct nullb *nullb = q->queuedata;
 	struct nullb_queue *nq = nullb_to_queue(nullb);
@@ -302,6 +318,7 @@ static void null_queue_bio(struct request_queue *q, struct bio *bio)
 	cmd->bio = bio;
 
 	null_handle_cmd(cmd);
+	return BLK_QC_T_NONE;
 }
 
 static int null_rq_prep_fn(struct request_queue *q, struct request *req)
@@ -316,6 +333,7 @@ static int null_rq_prep_fn(struct request_queue *q, struct request *req)
 		req->special = cmd;
 		return BLKPREP_OK;
 	}
+	blk_stop_queue(q);
 
 	return BLKPREP_DEFER;
 }
@@ -333,26 +351,31 @@ static void null_request_fn(struct request_queue *q)
 	}
 }
 
-static int null_queue_rq(struct blk_mq_hw_ctx *hctx, struct request *rq)
+static int null_queue_rq(struct blk_mq_hw_ctx *hctx,
+			 const struct blk_mq_queue_data *bd)
 {
-	struct nullb_cmd *cmd = rq->special;
+	struct nullb_cmd *cmd = blk_mq_rq_to_pdu(bd->rq);
 
-	cmd->rq = rq;
+	if (irqmode == NULL_IRQ_TIMER) {
+		hrtimer_init(&cmd->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+		cmd->timer.function = null_cmd_timer_expired;
+	}
+	cmd->rq = bd->rq;
 	cmd->nq = hctx->driver_data;
+
+	blk_mq_start_request(bd->rq);
 
 	null_handle_cmd(cmd);
 	return BLK_MQ_RQ_QUEUE_OK;
 }
 
-static struct blk_mq_hw_ctx *null_alloc_hctx(struct blk_mq_reg *reg, unsigned int hctx_index)
+static void null_init_queue(struct nullb *nullb, struct nullb_queue *nq)
 {
-	return kzalloc_node(sizeof(struct blk_mq_hw_ctx), GFP_KERNEL,
-				hctx_index);
-}
+	BUG_ON(!nullb);
+	BUG_ON(!nq);
 
-static void null_free_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_index)
-{
-	kfree(hctx);
+	init_waitqueue_head(&nq->wait);
+	nq->queue_depth = nullb->queue_depth;
 }
 
 static int null_init_hctx(struct blk_mq_hw_ctx *hctx, void *data,
@@ -361,10 +384,9 @@ static int null_init_hctx(struct blk_mq_hw_ctx *hctx, void *data,
 	struct nullb *nullb = data;
 	struct nullb_queue *nq = &nullb->queues[index];
 
-	init_waitqueue_head(&nq->wait);
-	nq->queue_depth = nullb->queue_depth;
-	nullb->nr_queues++;
 	hctx->driver_data = nq;
+	null_init_queue(nullb, nq);
+	nullb->nr_queues++;
 
 	return 0;
 }
@@ -373,27 +395,178 @@ static struct blk_mq_ops null_mq_ops = {
 	.queue_rq       = null_queue_rq,
 	.map_queue      = blk_mq_map_queue,
 	.init_hctx	= null_init_hctx,
+	.complete	= null_softirq_done_fn,
 };
 
-static struct blk_mq_reg null_mq_reg = {
-	.ops		= &null_mq_ops,
-	.queue_depth	= 64,
-	.cmd_size	= sizeof(struct nullb_cmd),
-	.flags		= BLK_MQ_F_SHOULD_MERGE,
-};
+static void cleanup_queue(struct nullb_queue *nq)
+{
+	kfree(nq->tag_map);
+	kfree(nq->cmds);
+}
+
+static void cleanup_queues(struct nullb *nullb)
+{
+	int i;
+
+	for (i = 0; i < nullb->nr_queues; i++)
+		cleanup_queue(&nullb->queues[i]);
+
+	kfree(nullb->queues);
+}
 
 static void null_del_dev(struct nullb *nullb)
 {
 	list_del_init(&nullb->list);
 
-	del_gendisk(nullb->disk);
-	if (queue_mode == NULL_Q_MQ)
-		blk_mq_free_queue(nullb->q);
+	if (use_lightnvm)
+		nvm_unregister(nullb->disk_name);
 	else
-		blk_cleanup_queue(nullb->q);
-	put_disk(nullb->disk);
+		del_gendisk(nullb->disk);
+	blk_cleanup_queue(nullb->q);
+	if (queue_mode == NULL_Q_MQ)
+		blk_mq_free_tag_set(&nullb->tag_set);
+	if (!use_lightnvm)
+		put_disk(nullb->disk);
+	cleanup_queues(nullb);
 	kfree(nullb);
 }
+
+#ifdef CONFIG_NVM
+
+static void null_lnvm_end_io(struct request *rq, int error)
+{
+	struct nvm_rq *rqd = rq->end_io_data;
+
+	nvm_end_io(rqd, error);
+
+	blk_put_request(rq);
+}
+
+static int null_lnvm_submit_io(struct nvm_dev *dev, struct nvm_rq *rqd)
+{
+	struct request_queue *q = dev->q;
+	struct request *rq;
+	struct bio *bio = rqd->bio;
+
+	rq = blk_mq_alloc_request(q, bio_rw(bio), 0);
+	if (IS_ERR(rq))
+		return -ENOMEM;
+
+	rq->cmd_type = REQ_TYPE_DRV_PRIV;
+	rq->__sector = bio->bi_iter.bi_sector;
+	rq->ioprio = bio_prio(bio);
+
+	if (bio_has_data(bio))
+		rq->nr_phys_segments = bio_phys_segments(q, bio);
+
+	rq->__data_len = bio->bi_iter.bi_size;
+	rq->bio = rq->biotail = bio;
+
+	rq->end_io_data = rqd;
+
+	blk_execute_rq_nowait(q, NULL, rq, 0, null_lnvm_end_io);
+
+	return 0;
+}
+
+static int null_lnvm_id(struct nvm_dev *dev, struct nvm_id *id)
+{
+	sector_t size = gb * 1024 * 1024 * 1024ULL;
+	sector_t blksize;
+	struct nvm_id_group *grp;
+
+	id->ver_id = 0x1;
+	id->vmnt = 0;
+	id->cgrps = 1;
+	id->cap = 0x2;
+	id->dom = 0x1;
+
+	id->ppaf.blk_offset = 0;
+	id->ppaf.blk_len = 16;
+	id->ppaf.pg_offset = 16;
+	id->ppaf.pg_len = 16;
+	id->ppaf.sect_offset = 32;
+	id->ppaf.sect_len = 8;
+	id->ppaf.pln_offset = 40;
+	id->ppaf.pln_len = 8;
+	id->ppaf.lun_offset = 48;
+	id->ppaf.lun_len = 8;
+	id->ppaf.ch_offset = 56;
+	id->ppaf.ch_len = 8;
+
+	sector_div(size, bs); /* convert size to pages */
+	size >>= 8; /* concert size to pgs pr blk */
+	grp = &id->groups[0];
+	grp->mtype = 0;
+	grp->fmtype = 0;
+	grp->num_ch = 1;
+	grp->num_pg = 256;
+	blksize = size;
+	size >>= 16;
+	grp->num_lun = size + 1;
+	sector_div(blksize, grp->num_lun);
+	grp->num_blk = blksize;
+	grp->num_pln = 1;
+
+	grp->fpg_sz = bs;
+	grp->csecs = bs;
+	grp->trdt = 25000;
+	grp->trdm = 25000;
+	grp->tprt = 500000;
+	grp->tprm = 500000;
+	grp->tbet = 1500000;
+	grp->tbem = 1500000;
+	grp->mpos = 0x010101; /* single plane rwe */
+	grp->cpar = hw_queue_depth;
+
+	return 0;
+}
+
+static void *null_lnvm_create_dma_pool(struct nvm_dev *dev, char *name)
+{
+	mempool_t *virtmem_pool;
+
+	virtmem_pool = mempool_create_slab_pool(64, ppa_cache);
+	if (!virtmem_pool) {
+		pr_err("null_blk: Unable to create virtual memory pool\n");
+		return NULL;
+	}
+
+	return virtmem_pool;
+}
+
+static void null_lnvm_destroy_dma_pool(void *pool)
+{
+	mempool_destroy(pool);
+}
+
+static void *null_lnvm_dev_dma_alloc(struct nvm_dev *dev, void *pool,
+				gfp_t mem_flags, dma_addr_t *dma_handler)
+{
+	return mempool_alloc(pool, mem_flags);
+}
+
+static void null_lnvm_dev_dma_free(void *pool, void *entry,
+							dma_addr_t dma_handler)
+{
+	mempool_free(entry, pool);
+}
+
+static struct nvm_dev_ops null_lnvm_dev_ops = {
+	.identity		= null_lnvm_id,
+	.submit_io		= null_lnvm_submit_io,
+
+	.create_dma_pool	= null_lnvm_create_dma_pool,
+	.destroy_dma_pool	= null_lnvm_destroy_dma_pool,
+	.dev_dma_alloc		= null_lnvm_dev_dma_alloc,
+	.dev_dma_free		= null_lnvm_dev_dma_free,
+
+	/* Simulate nvme protocol restriction */
+	.max_phys_sect		= 64,
+};
+#else
+static struct nvm_dev_ops null_lnvm_dev_ops;
+#endif /* CONFIG_NVM */
 
 static int null_open(struct block_device *bdev, fmode_t mode)
 {
@@ -417,13 +590,13 @@ static int setup_commands(struct nullb_queue *nq)
 
 	nq->cmds = kzalloc(nq->queue_depth * sizeof(*cmd), GFP_KERNEL);
 	if (!nq->cmds)
-		return 1;
+		return -ENOMEM;
 
 	tag_size = ALIGN(nq->queue_depth, BITS_PER_LONG) / BITS_PER_LONG;
 	nq->tag_map = kzalloc(tag_size * sizeof(unsigned long), GFP_KERNEL);
 	if (!nq->tag_map) {
 		kfree(nq->cmds);
-		return 1;
+		return -ENOMEM;
 	}
 
 	for (i = 0; i < nq->queue_depth; i++) {
@@ -436,51 +609,35 @@ static int setup_commands(struct nullb_queue *nq)
 	return 0;
 }
 
-static void cleanup_queue(struct nullb_queue *nq)
-{
-	kfree(nq->tag_map);
-	kfree(nq->cmds);
-}
-
-static void cleanup_queues(struct nullb *nullb)
-{
-	int i;
-
-	for (i = 0; i < nullb->nr_queues; i++)
-		cleanup_queue(&nullb->queues[i]);
-
-	kfree(nullb->queues);
-}
-
 static int setup_queues(struct nullb *nullb)
 {
-	struct nullb_queue *nq;
-	int i;
-
-	nullb->queues = kzalloc(submit_queues * sizeof(*nq), GFP_KERNEL);
+	nullb->queues = kzalloc(submit_queues * sizeof(struct nullb_queue),
+								GFP_KERNEL);
 	if (!nullb->queues)
-		return 1;
+		return -ENOMEM;
 
 	nullb->nr_queues = 0;
 	nullb->queue_depth = hw_queue_depth;
 
-	if (queue_mode == NULL_Q_MQ)
-		return 0;
+	return 0;
+}
+
+static int init_driver_queues(struct nullb *nullb)
+{
+	struct nullb_queue *nq;
+	int i, ret = 0;
 
 	for (i = 0; i < submit_queues; i++) {
 		nq = &nullb->queues[i];
-		init_waitqueue_head(&nq->wait);
-		nq->queue_depth = hw_queue_depth;
-		if (setup_commands(nq))
-			break;
+
+		null_init_queue(nullb, nq);
+
+		ret = setup_commands(nq);
+		if (ret)
+			return ret;
 		nullb->nr_queues++;
 	}
-
-	if (i == submit_queues)
-		return 0;
-
-	cleanup_queues(nullb);
-	return 1;
+	return 0;
 }
 
 static int null_add_dev(void)
@@ -488,130 +645,194 @@ static int null_add_dev(void)
 	struct gendisk *disk;
 	struct nullb *nullb;
 	sector_t size;
+	int rv;
 
 	nullb = kzalloc_node(sizeof(*nullb), GFP_KERNEL, home_node);
-	if (!nullb)
-		return -ENOMEM;
+	if (!nullb) {
+		rv = -ENOMEM;
+		goto out;
+	}
 
 	spin_lock_init(&nullb->lock);
 
-	if (setup_queues(nullb))
-		goto err;
+	if (queue_mode == NULL_Q_MQ && use_per_node_hctx)
+		submit_queues = nr_online_nodes;
+
+	rv = setup_queues(nullb);
+	if (rv)
+		goto out_free_nullb;
 
 	if (queue_mode == NULL_Q_MQ) {
-		null_mq_reg.numa_node = home_node;
-		null_mq_reg.queue_depth = hw_queue_depth;
+		nullb->tag_set.ops = &null_mq_ops;
+		nullb->tag_set.nr_hw_queues = submit_queues;
+		nullb->tag_set.queue_depth = hw_queue_depth;
+		nullb->tag_set.numa_node = home_node;
+		nullb->tag_set.cmd_size	= sizeof(struct nullb_cmd);
+		nullb->tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
+		nullb->tag_set.driver_data = nullb;
 
-		if (use_per_node_hctx) {
-			null_mq_reg.ops->alloc_hctx = null_alloc_hctx;
-			null_mq_reg.ops->free_hctx = null_free_hctx;
+		rv = blk_mq_alloc_tag_set(&nullb->tag_set);
+		if (rv)
+			goto out_cleanup_queues;
 
-			null_mq_reg.nr_hw_queues = nr_online_nodes;
-		} else {
-			null_mq_reg.ops->alloc_hctx = blk_mq_alloc_single_hw_queue;
-			null_mq_reg.ops->free_hctx = blk_mq_free_single_hw_queue;
-
-			null_mq_reg.nr_hw_queues = submit_queues;
+		nullb->q = blk_mq_init_queue(&nullb->tag_set);
+		if (IS_ERR(nullb->q)) {
+			rv = -ENOMEM;
+			goto out_cleanup_tags;
 		}
-
-		nullb->q = blk_mq_init_queue(&null_mq_reg, nullb);
 	} else if (queue_mode == NULL_Q_BIO) {
 		nullb->q = blk_alloc_queue_node(GFP_KERNEL, home_node);
+		if (!nullb->q) {
+			rv = -ENOMEM;
+			goto out_cleanup_queues;
+		}
 		blk_queue_make_request(nullb->q, null_queue_bio);
+		rv = init_driver_queues(nullb);
+		if (rv)
+			goto out_cleanup_blk_queue;
 	} else {
 		nullb->q = blk_init_queue_node(null_request_fn, &nullb->lock, home_node);
+		if (!nullb->q) {
+			rv = -ENOMEM;
+			goto out_cleanup_queues;
+		}
 		blk_queue_prep_rq(nullb->q, null_rq_prep_fn);
-		if (nullb->q)
-			blk_queue_softirq_done(nullb->q, null_softirq_done_fn);
+		blk_queue_softirq_done(nullb->q, null_softirq_done_fn);
+		rv = init_driver_queues(nullb);
+		if (rv)
+			goto out_cleanup_blk_queue;
 	}
-
-	if (!nullb->q)
-		goto queue_fail;
 
 	nullb->q->queuedata = nullb;
 	queue_flag_set_unlocked(QUEUE_FLAG_NONROT, nullb->q);
-
-	disk = nullb->disk = alloc_disk_node(1, home_node);
-	if (!disk) {
-queue_fail:
-		if (queue_mode == NULL_Q_MQ)
-			blk_mq_free_queue(nullb->q);
-		else
-			blk_cleanup_queue(nullb->q);
-		cleanup_queues(nullb);
-err:
-		kfree(nullb);
-		return -ENOMEM;
-	}
+	queue_flag_clear_unlocked(QUEUE_FLAG_ADD_RANDOM, nullb->q);
 
 	mutex_lock(&lock);
-	list_add_tail(&nullb->list, &nullb_list);
 	nullb->index = nullb_indexes++;
 	mutex_unlock(&lock);
 
 	blk_queue_logical_block_size(nullb->q, bs);
 	blk_queue_physical_block_size(nullb->q, bs);
 
-	size = gb * 1024 * 1024 * 1024ULL;
-	sector_div(size, bs);
-	set_capacity(disk, size);
+	sprintf(nullb->disk_name, "nullb%d", nullb->index);
 
-	disk->flags |= GENHD_FL_EXT_DEVT;
+	if (use_lightnvm) {
+		rv = nvm_register(nullb->q, nullb->disk_name,
+							&null_lnvm_dev_ops);
+		if (rv)
+			goto out_cleanup_blk_queue;
+		goto done;
+	}
+
+	disk = nullb->disk = alloc_disk_node(1, home_node);
+	if (!disk) {
+		rv = -ENOMEM;
+		goto out_cleanup_lightnvm;
+	}
+	size = gb * 1024 * 1024 * 1024ULL;
+	set_capacity(disk, size >> 9);
+
+	disk->flags |= GENHD_FL_EXT_DEVT | GENHD_FL_SUPPRESS_PARTITION_INFO;
 	disk->major		= null_major;
 	disk->first_minor	= nullb->index;
 	disk->fops		= &null_fops;
 	disk->private_data	= nullb;
 	disk->queue		= nullb->q;
-	sprintf(disk->disk_name, "nullb%d", nullb->index);
+	strncpy(disk->disk_name, nullb->disk_name, DISK_NAME_LEN);
+
 	add_disk(disk);
+
+	mutex_lock(&lock);
+	list_add_tail(&nullb->list, &nullb_list);
+	mutex_unlock(&lock);
+done:
 	return 0;
+
+out_cleanup_lightnvm:
+	if (use_lightnvm)
+		nvm_unregister(nullb->disk_name);
+out_cleanup_blk_queue:
+	blk_cleanup_queue(nullb->q);
+out_cleanup_tags:
+	if (queue_mode == NULL_Q_MQ)
+		blk_mq_free_tag_set(&nullb->tag_set);
+out_cleanup_queues:
+	cleanup_queues(nullb);
+out_free_nullb:
+	kfree(nullb);
+out:
+	return rv;
 }
 
 static int __init null_init(void)
 {
+	int ret = 0;
 	unsigned int i;
+	struct nullb *nullb;
 
-#if !defined(CONFIG_SMP)
-	if (irqmode == NULL_IRQ_SOFTIRQ) {
-		pr_warn("null_blk: softirq completions not available.\n");
-		pr_warn("null_blk: using direct completions.\n");
-		irqmode = NULL_IRQ_NONE;
+	if (bs > PAGE_SIZE) {
+		pr_warn("null_blk: invalid block size\n");
+		pr_warn("null_blk: defaults block size to %lu\n", PAGE_SIZE);
+		bs = PAGE_SIZE;
 	}
-#endif
 
-	if (submit_queues > nr_cpu_ids)
+	if (use_lightnvm && bs != 4096) {
+		pr_warn("null_blk: LightNVM only supports 4k block size\n");
+		pr_warn("null_blk: defaults block size to 4k\n");
+		bs = 4096;
+	}
+
+	if (use_lightnvm && queue_mode != NULL_Q_MQ) {
+		pr_warn("null_blk: LightNVM only supported for blk-mq\n");
+		pr_warn("null_blk: defaults queue mode to blk-mq\n");
+		queue_mode = NULL_Q_MQ;
+	}
+
+	if (queue_mode == NULL_Q_MQ && use_per_node_hctx) {
+		if (submit_queues < nr_online_nodes) {
+			pr_warn("null_blk: submit_queues param is set to %u.",
+							nr_online_nodes);
+			submit_queues = nr_online_nodes;
+		}
+	} else if (submit_queues > nr_cpu_ids)
 		submit_queues = nr_cpu_ids;
 	else if (!submit_queues)
 		submit_queues = 1;
 
 	mutex_init(&lock);
 
-	/* Initialize a separate list for each CPU for issuing softirqs */
-	for_each_possible_cpu(i) {
-		struct completion_queue *cq = &per_cpu(completion_queues, i);
-
-		init_llist_head(&cq->list);
-
-		if (irqmode != NULL_IRQ_TIMER)
-			continue;
-
-		hrtimer_init(&cq->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-		cq->timer.function = null_cmd_timer_expired;
-	}
-
 	null_major = register_blkdev(0, "nullb");
 	if (null_major < 0)
 		return null_major;
 
-	for (i = 0; i < nr_devices; i++) {
-		if (null_add_dev()) {
-			unregister_blkdev(null_major, "nullb");
-			return -EINVAL;
+	if (use_lightnvm) {
+		ppa_cache = kmem_cache_create("ppa_cache", 64 * sizeof(u64),
+								0, 0, NULL);
+		if (!ppa_cache) {
+			pr_err("null_blk: unable to create ppa cache\n");
+			ret = -ENOMEM;
+			goto err_ppa;
 		}
+	}
+
+	for (i = 0; i < nr_devices; i++) {
+		ret = null_add_dev();
+		if (ret)
+			goto err_dev;
 	}
 
 	pr_info("null: module loaded\n");
 	return 0;
+
+err_dev:
+	while (!list_empty(&nullb_list)) {
+		nullb = list_entry(nullb_list.next, struct nullb, list);
+		null_del_dev(nullb);
+	}
+	kmem_cache_destroy(ppa_cache);
+err_ppa:
+	unregister_blkdev(null_major, "nullb");
+	return ret;
 }
 
 static void __exit null_exit(void)
@@ -626,6 +847,8 @@ static void __exit null_exit(void)
 		null_del_dev(nullb);
 	}
 	mutex_unlock(&lock);
+
+	kmem_cache_destroy(ppa_cache);
 }
 
 module_init(null_init);

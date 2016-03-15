@@ -112,7 +112,7 @@ static int tef6862_s_frequency(struct v4l2_subdev *sd, const struct v4l2_frequen
 	if (f->tuner != 0)
 		return -EINVAL;
 
-	clamp(freq, TEF6862_LO_FREQ, TEF6862_HI_FREQ);
+	freq = clamp(freq, TEF6862_LO_FREQ, TEF6862_HI_FREQ);
 	pll = 1964 + ((freq - TEF6862_LO_FREQ) * 20) / FREQ_MUL;
 	i2cmsg[0] = (MSA_MODE_PRESET << MSA_MODE_SHIFT) | WM_SUB_PLLM;
 	i2cmsg[1] = (pll >> 8) & 0xff;
@@ -195,7 +195,6 @@ MODULE_DEVICE_TABLE(i2c, tef6862_id);
 
 static struct i2c_driver tef6862_driver = {
 	.driver = {
-		.owner	= THIS_MODULE,
 		.name	= DRIVER_NAME,
 	},
 	.probe		= tef6862_probe,

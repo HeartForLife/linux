@@ -137,7 +137,7 @@ static int shark_read_reg(struct radio_tea5777 *tea, u32 *reg_ret)
 	return 0;
 }
 
-static struct radio_tea5777_ops shark_tea_ops = {
+static const struct radio_tea5777_ops shark_tea_ops = {
 	.write_reg = shark_write_reg,
 	.read_reg  = shark_read_reg,
 };
@@ -237,8 +237,7 @@ static void shark_unregister_leds(struct shark_device *shark)
 	cancel_work_sync(&shark->led_work);
 }
 
-#ifdef CONFIG_PM
-static void shark_resume_leds(struct shark_device *shark)
+static inline void shark_resume_leds(struct shark_device *shark)
 {
 	int i;
 
@@ -247,7 +246,6 @@ static void shark_resume_leds(struct shark_device *shark)
 
 	schedule_work(&shark->led_work);
 }
-#endif
 #else
 static int shark_register_leds(struct shark_device *shark, struct device *dev)
 {

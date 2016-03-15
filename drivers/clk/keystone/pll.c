@@ -10,7 +10,6 @@
  * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
  */
-#include <linux/clk.h>
 #include <linux/clk-provider.h>
 #include <linux/err.h>
 #include <linux/io.h>
@@ -24,6 +23,8 @@
 #define MAIN_PLLM_HIGH_MASK	0x7f000
 #define PLLM_HIGH_SHIFT		6
 #define PLLD_MASK		0x3f
+#define CLKOD_MASK		0x780000
+#define CLKOD_SHIFT		19
 
 /**
  * struct clk_pll_data - pll data structure
@@ -35,24 +36,31 @@
  *	Main PLL or any other PLLs in the device such as ARM PLL, DDR PLL
  *	or PA PLL available on keystone2. These PLLs are controlled by
  *	this register. Main PLL is controlled by a PLL controller.
- * @pllm: PLL register map address
+ * @pllm: PLL register map address for multiplier bits
+ * @pllod: PLL register map address for post divider bits
  * @pll_ctl0: PLL controller map address
  * @pllm_lower_mask: multiplier lower mask
  * @pllm_upper_mask: multiplier upper mask
  * @pllm_upper_shift: multiplier upper shift
  * @plld_mask: divider mask
- * @postdiv: Post divider
+ * @clkod_mask: output divider mask
+ * @clkod_shift: output divider shift
+ * @plld_mask: divider mask
+ * @postdiv: Fixed post divider
  */
 struct clk_pll_data {
 	bool has_pllctrl;
 	u32 phy_pllm;
 	u32 phy_pll_ctl0;
 	void __iomem *pllm;
+	void __iomem *pllod;
 	void __iomem *pll_ctl0;
 	u32 pllm_lower_mask;
 	u32 pllm_upper_mask;
 	u32 pllm_upper_shift;
 	u32 plld_mask;
+	u32 clkod_mask;
+	u32 clkod_shift;
 	u32 postdiv;
 };
 
@@ -90,7 +98,17 @@ static unsigned long clk_pllclk_recalc(struct clk_hw *hw,
 	mult |= ((val & pll_data->pllm_upper_mask)
 			>> pll_data->pllm_upper_shift);
 	prediv = (val & pll_data->plld_mask);
-	postdiv = pll_data->postdiv;
+
+	if (!pll_data->has_pllctrl)
+		/* read post divider from od bits*/
+		postdiv = ((val & pll_data->clkod_mask) >>
+				 pll_data->clkod_shift) + 1;
+	else if (pll_data->pllod) {
+		postdiv = readl(pll_data->pllod);
+		postdiv = ((postdiv & pll_data->clkod_mask) >>
+				pll_data->clkod_shift) + 1;
+	} else
+		postdiv = pll_data->postdiv;
 
 	rate /= (prediv + 1);
 	rate = (rate * (mult + 1));
@@ -139,7 +157,7 @@ out:
  * _of_clk_init - PLL initialisation via DT
  * @node: device tree node for this clock
  * @pllctrl: If true, lower 6 bits of multiplier is in pllm register of
- *		pll controller, else it is in the control regsiter0(bit 11-6)
+ *		pll controller, else it is in the control register0(bit 11-6)
  */
 static void __init _of_pll_clk_init(struct device_node *node, bool pllctrl)
 {
@@ -155,13 +173,25 @@ static void __init _of_pll_clk_init(struct device_node *node, bool pllctrl)
 	}
 
 	parent_name = of_clk_get_parent_name(node, 0);
-	if (of_property_read_u32(node, "fixed-postdiv",	&pll_data->postdiv))
-		goto out;
+	if (of_property_read_u32(node, "fixed-postdiv",	&pll_data->postdiv)) {
+		/* assume the PLL has output divider register bits */
+		pll_data->clkod_mask = CLKOD_MASK;
+		pll_data->clkod_shift = CLKOD_SHIFT;
+
+		/*
+		 * Check if there is an post-divider register. If not
+		 * assume od bits are part of control register.
+		 */
+		i = of_property_match_string(node, "reg-names",
+					     "post-divider");
+		pll_data->pllod = of_iomap(node, i);
+	}
 
 	i = of_property_match_string(node, "reg-names", "control");
 	pll_data->pll_ctl0 = of_iomap(node, i);
 	if (!pll_data->pll_ctl0) {
 		pr_err("%s: ioremap failed\n", __func__);
+		iounmap(pll_data->pllod);
 		goto out;
 	}
 
@@ -177,6 +207,7 @@ static void __init _of_pll_clk_init(struct device_node *node, bool pllctrl)
 		pll_data->pllm = of_iomap(node, i);
 		if (!pll_data->pllm) {
 			iounmap(pll_data->pll_ctl0);
+			iounmap(pll_data->pllod);
 			goto out;
 		}
 	}
@@ -277,8 +308,7 @@ static void __init of_pll_mux_clk_init(struct device_node *node)
 		return;
 	}
 
-	parents[0] = of_clk_get_parent_name(node, 0);
-	parents[1] = of_clk_get_parent_name(node, 1);
+	of_clk_parent_fill(node, parents, 2);
 	if (!parents[0] || !parents[1]) {
 		pr_err("%s: missing parent clocks\n", __func__);
 		return;

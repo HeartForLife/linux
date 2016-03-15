@@ -149,7 +149,7 @@ linux-api@ver.kernel.org に送ることを勧めます。
      この他にパッチを作る方法についてのよくできた記述は-
 
 	"The Perfect Patch"
-		http://userweb.kernel.org/~akpm/stuff/tpp.txt
+		http://www.ozlabs.org/~akpm/stuff/tpp.txt
 	"Linux kernel patch submission format"
 		http://linux.yyz.us/patch-format.html
 
@@ -245,7 +245,7 @@ Linux カーネルソースツリーの中に含まれる、きれいにし、�
 自己参照方式で、索引がついた web 形式で、ソースコードを参照することが
 できます。この最新の素晴しいカーネルコードのリポジトリは以下で見つかり
 ます-
-	http://lxr.linux.no/+trees
+	http://lxr.free-electrons.com/
 
 開発プロセス
 -----------------------
@@ -315,7 +315,7 @@ Andrew Morton が Linux-kernel メーリングリストにカーネルリリー�
 もし、3.x.y カーネルが存在しない場合には、番号が一番大きい 3.x が
 最新の安定版カーネルです。
 
-3.x.y は "stable" チーム <stable@kernel.org> でメンテされており、必
+3.x.y は "stable" チーム <stable@vger.kernel.org> でメンテされており、必
 要に応じてリリースされます。通常のリリース期間は 2週間毎ですが、差し迫っ
 た問題がなければもう少し長くなることもあります。セキュリティ関連の問題
 の場合はこれに対してだいたいの場合、すぐにリリースがされます。
@@ -366,7 +366,6 @@ http://patchwork.kernel.org/ でリストされています。
 に全サブシステムツリーからほぼ毎日プルされてできる特別なテスト用のリ
 ポジトリが存在します-
        http://git.kernel.org/?p=linux/kernel/git/next/linux-next.git
-       http://linux.f-seidel.de/linux-next/pmwiki/
 
 このやり方によって、-next カーネルは次のマージ機会でどんなものがメイン
 ラインカーネルにマージされるか、おおまかなの展望を提供します。-next 
@@ -445,7 +444,7 @@ MAINTAINERS ファイルにリストがありますので参照してくださ�
 メールの先頭でなく、各引用行の間にあなたの言いたいことを追加するべきで
 す。
 
-もしパッチをメールに付ける場合は、Documentaion/SubmittingPatches に提
+もしパッチをメールに付ける場合は、Documentation/SubmittingPatches に提
 示されているように、それは プレーンな可読テキストにすることを忘れない
 ようにしましょう。カーネル開発者は 添付や圧縮したパッチを扱いたがりま
 せん-
@@ -622,7 +621,7 @@ Linux カーネルコミュニティは、一度に大量のコードの塊を�
 これについて全てがどのようにあるべきかについての詳細は、以下のドキュメ
 ントの ChangeLog セクションを見てください-
   "The Perfect Patch"
-      http://userweb.kernel.org/~akpm/stuff/tpp.txt
+      http://www.ozlabs.org/~akpm/stuff/tpp.txt
 
 これらのどれもが、時にはとても困難です。これらの慣例を完璧に実施するに
 は数年かかるかもしれません。これは継続的な改善のプロセスであり、そのた

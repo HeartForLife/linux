@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2013, Intel Corp.
+ * Copyright (C) 2000 - 2016, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -100,37 +100,6 @@ void acpi_ex_enter_interpreter(void)
 
 /*******************************************************************************
  *
- * FUNCTION:    acpi_ex_reacquire_interpreter
- *
- * PARAMETERS:  None
- *
- * RETURN:      None
- *
- * DESCRIPTION: Reacquire the interpreter execution region from within the
- *              interpreter code. Failure to enter the interpreter region is a
- *              fatal system error. Used in conjunction with
- *              relinquish_interpreter
- *
- ******************************************************************************/
-
-void acpi_ex_reacquire_interpreter(void)
-{
-	ACPI_FUNCTION_TRACE(ex_reacquire_interpreter);
-
-	/*
-	 * If the global serialized flag is set, do not release the interpreter,
-	 * since it was not actually released by acpi_ex_relinquish_interpreter.
-	 * This forces the interpreter to be single threaded.
-	 */
-	if (!acpi_gbl_all_methods_serialized) {
-		acpi_ex_enter_interpreter();
-	}
-
-	return_VOID;
-}
-
-/*******************************************************************************
- *
  * FUNCTION:    acpi_ex_exit_interpreter
  *
  * PARAMETERS:  None
@@ -139,7 +108,16 @@ void acpi_ex_reacquire_interpreter(void)
  *
  * DESCRIPTION: Exit the interpreter execution region. This is the top level
  *              routine used to exit the interpreter when all processing has
- *              been completed.
+ *              been completed, or when the method blocks.
+ *
+ * Cases where the interpreter is unlocked internally:
+ *      1) Method will be blocked on a Sleep() AML opcode
+ *      2) Method will be blocked on an Acquire() AML opcode
+ *      3) Method will be blocked on a Wait() AML opcode
+ *      4) Method will be blocked to acquire the global lock
+ *      5) Method will be blocked waiting to execute a serialized control
+ *          method that is currently executing
+ *      6) About to invoke a user-installed opregion handler
  *
  ******************************************************************************/
 
@@ -153,44 +131,6 @@ void acpi_ex_exit_interpreter(void)
 	if (ACPI_FAILURE(status)) {
 		ACPI_ERROR((AE_INFO,
 			    "Could not release AML Interpreter mutex"));
-	}
-
-	return_VOID;
-}
-
-/*******************************************************************************
- *
- * FUNCTION:    acpi_ex_relinquish_interpreter
- *
- * PARAMETERS:  None
- *
- * RETURN:      None
- *
- * DESCRIPTION: Exit the interpreter execution region, from within the
- *              interpreter - before attempting an operation that will possibly
- *              block the running thread.
- *
- * Cases where the interpreter is unlocked internally
- *      1) Method to be blocked on a Sleep() AML opcode
- *      2) Method to be blocked on an Acquire() AML opcode
- *      3) Method to be blocked on a Wait() AML opcode
- *      4) Method to be blocked to acquire the global lock
- *      5) Method to be blocked waiting to execute a serialized control method
- *          that is currently executing
- *      6) About to invoke a user-installed opregion handler
- *
- ******************************************************************************/
-
-void acpi_ex_relinquish_interpreter(void)
-{
-	ACPI_FUNCTION_TRACE(ex_relinquish_interpreter);
-
-	/*
-	 * If the global serialized flag is set, do not release the interpreter.
-	 * This forces the interpreter to be single threaded.
-	 */
-	if (!acpi_gbl_all_methods_serialized) {
-		acpi_ex_exit_interpreter();
 	}
 
 	return_VOID;
@@ -227,8 +167,8 @@ u8 acpi_ex_truncate_for32bit_table(union acpi_operand_object *obj_desc)
 	if ((acpi_gbl_integer_byte_width == 4) &&
 	    (obj_desc->integer.value > (u64)ACPI_UINT32_MAX)) {
 		/*
-		 * We are executing in a 32-bit ACPI table.
-		 * Truncate the value to 32 bits by zeroing out the upper 32-bit field
+		 * We are executing in a 32-bit ACPI table. Truncate
+		 * the value to 32 bits by zeroing out the upper 32-bit field
 		 */
 		obj_desc->integer.value &= (u64)ACPI_UINT32_MAX;
 		return (TRUE);
@@ -383,7 +323,8 @@ void acpi_ex_eisa_id_to_string(char *out_string, u64 compressed_id)
 
 	if (compressed_id > ACPI_UINT32_MAX) {
 		ACPI_WARNING((AE_INFO,
-			      "Expected EISAID is larger than 32 bits: 0x%8.8X%8.8X, truncating",
+			      "Expected EISAID is larger than 32 bits: "
+			      "0x%8.8X%8.8X, truncating",
 			      ACPI_FORMAT_UINT64(compressed_id)));
 	}
 
@@ -436,6 +377,38 @@ void acpi_ex_integer_to_string(char *out_string, u64 value)
 		(void)acpi_ut_short_divide(value, 10, &value, &remainder);
 		out_string[count - 1] = (char)('0' + remainder);
 	}
+}
+
+/*******************************************************************************
+ *
+ * FUNCTION:    acpi_ex_pci_cls_to_string
+ *
+ * PARAMETERS:  out_string      - Where to put the converted string (7 bytes)
+ * PARAMETERS:  class_code      - PCI class code to be converted (3 bytes)
+ *
+ * RETURN:      None
+ *
+ * DESCRIPTION: Convert 3-bytes PCI class code to string representation.
+ *              Return buffer must be large enough to hold the string. The
+ *              string returned is always exactly of length
+ *              ACPI_PCICLS_STRING_SIZE (includes null terminator).
+ *
+ ******************************************************************************/
+
+void acpi_ex_pci_cls_to_string(char *out_string, u8 class_code[3])
+{
+
+	ACPI_FUNCTION_ENTRY();
+
+	/* All 3 bytes are hexadecimal */
+
+	out_string[0] = acpi_ut_hex_to_ascii_char((u64)class_code[0], 4);
+	out_string[1] = acpi_ut_hex_to_ascii_char((u64)class_code[0], 0);
+	out_string[2] = acpi_ut_hex_to_ascii_char((u64)class_code[1], 4);
+	out_string[3] = acpi_ut_hex_to_ascii_char((u64)class_code[1], 0);
+	out_string[4] = acpi_ut_hex_to_ascii_char((u64)class_code[2], 4);
+	out_string[5] = acpi_ut_hex_to_ascii_char((u64)class_code[2], 0);
+	out_string[6] = 0;
 }
 
 /*******************************************************************************

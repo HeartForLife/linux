@@ -64,7 +64,6 @@ struct as3722_pin_function {
 };
 
 struct as3722_gpio_pin_control {
-	bool enable_gpio_invert;
 	unsigned mode_prop;
 	int io_function;
 };
@@ -231,7 +230,7 @@ static int as3722_pinctrl_get_func_groups(struct pinctrl_dev *pctldev,
 	return 0;
 }
 
-static int as3722_pinctrl_enable(struct pinctrl_dev *pctldev, unsigned function,
+static int as3722_pinctrl_set(struct pinctrl_dev *pctldev, unsigned function,
 		unsigned group)
 {
 	struct as3722_pctrl_info *as_pci = pinctrl_dev_get_drvdata(pctldev);
@@ -250,6 +249,26 @@ static int as3722_pinctrl_enable(struct pinctrl_dev *pctldev, unsigned function,
 		return ret;
 	}
 	as_pci->gpio_control[group].io_function = function;
+
+	switch (val) {
+	case AS3722_GPIO_IOSF_SD0_OUT:
+	case AS3722_GPIO_IOSF_PWR_GOOD_OUT:
+	case AS3722_GPIO_IOSF_Q32K_OUT:
+	case AS3722_GPIO_IOSF_PWM_OUT:
+	case AS3722_GPIO_IOSF_SD6_LOW_VOLT_LOW:
+		ret = as3722_update_bits(as_pci->as3722, gpio_cntr_reg,
+			AS3722_GPIO_MODE_MASK, AS3722_GPIO_MODE_OUTPUT_VDDH);
+		if (ret < 0) {
+			dev_err(as_pci->dev, "GPIO%d_CTRL update failed %d\n",
+				group, ret);
+			return ret;
+		}
+		as_pci->gpio_control[group].mode_prop =
+				AS3722_GPIO_MODE_OUTPUT_VDDH;
+		break;
+	default:
+		break;
+	}
 	return ret;
 }
 
@@ -300,17 +319,15 @@ static int as3722_pinctrl_gpio_set_direction(struct pinctrl_dev *pctldev,
 		return mode;
 	}
 
-	if (as_pci->gpio_control[offset].enable_gpio_invert)
-		mode |= AS3722_GPIO_INV;
-
-	return as3722_write(as3722, AS3722_GPIOn_CONTROL_REG(offset), mode);
+	return as3722_update_bits(as3722, AS3722_GPIOn_CONTROL_REG(offset),
+				AS3722_GPIO_MODE_MASK, mode);
 }
 
 static const struct pinmux_ops as3722_pinmux_ops = {
 	.get_functions_count	= as3722_pinctrl_get_funcs_count,
 	.get_function_name	= as3722_pinctrl_get_func_name,
 	.get_function_groups	= as3722_pinctrl_get_func_groups,
-	.enable			= as3722_pinctrl_enable,
+	.set_mux		= as3722_pinctrl_set,
 	.gpio_request_enable	= as3722_pinctrl_gpio_request_enable,
 	.gpio_set_direction	= as3722_pinctrl_gpio_set_direction,
 };
@@ -419,14 +436,9 @@ static struct pinctrl_desc as3722_pinctrl_desc = {
 	.owner = THIS_MODULE,
 };
 
-static inline struct as3722_pctrl_info *to_as_pci(struct gpio_chip *chip)
-{
-	return container_of(chip, struct as3722_pctrl_info, gpio_chip);
-}
-
 static int as3722_gpio_get(struct gpio_chip *chip, unsigned offset)
 {
-	struct as3722_pctrl_info *as_pci = to_as_pci(chip);
+	struct as3722_pctrl_info *as_pci = gpiochip_get_data(chip);
 	struct as3722 *as3722 = as_pci->as3722;
 	int ret;
 	u32 reg;
@@ -474,11 +486,19 @@ static int as3722_gpio_get(struct gpio_chip *chip, unsigned offset)
 static void as3722_gpio_set(struct gpio_chip *chip, unsigned offset,
 		int value)
 {
-	struct as3722_pctrl_info *as_pci = to_as_pci(chip);
+	struct as3722_pctrl_info *as_pci = gpiochip_get_data(chip);
 	struct as3722 *as3722 = as_pci->as3722;
-	int en_invert = as_pci->gpio_control[offset].enable_gpio_invert;
+	int en_invert;
 	u32 val;
 	int ret;
+
+	ret = as3722_read(as3722, AS3722_GPIOn_CONTROL_REG(offset), &val);
+	if (ret < 0) {
+		dev_err(as_pci->dev,
+			"GPIO_CONTROL%d_REG read failed: %d\n", offset, ret);
+		return;
+	}
+	en_invert = !!(val & AS3722_GPIO_INV);
 
 	if (value)
 		val = (en_invert) ? 0 : AS3722_GPIOn_SIGNAL(offset);
@@ -506,32 +526,22 @@ static int as3722_gpio_direction_output(struct gpio_chip *chip,
 
 static int as3722_gpio_to_irq(struct gpio_chip *chip, unsigned offset)
 {
-	struct as3722_pctrl_info *as_pci = to_as_pci(chip);
+	struct as3722_pctrl_info *as_pci = gpiochip_get_data(chip);
 
 	return as3722_irq_get_virq(as_pci->as3722, offset);
-}
-
-static int as3722_gpio_request(struct gpio_chip *chip, unsigned offset)
-{
-	return pinctrl_request_gpio(chip->base + offset);
-}
-
-static void as3722_gpio_free(struct gpio_chip *chip, unsigned offset)
-{
-	pinctrl_free_gpio(chip->base + offset);
 }
 
 static const struct gpio_chip as3722_gpio_chip = {
 	.label			= "as3722-gpio",
 	.owner			= THIS_MODULE,
-	.request		= as3722_gpio_request,
-	.free			= as3722_gpio_free,
+	.request		= gpiochip_generic_request,
+	.free			= gpiochip_generic_free,
 	.get			= as3722_gpio_get,
 	.set			= as3722_gpio_set,
 	.direction_input	= as3722_gpio_direction_input,
 	.direction_output	= as3722_gpio_direction_output,
 	.to_irq			= as3722_gpio_to_irq,
-	.can_sleep		= 1,
+	.can_sleep		= true,
 	.ngpio			= AS3722_PIN_NUM,
 	.base			= -1,
 };
@@ -540,7 +550,6 @@ static int as3722_pinctrl_probe(struct platform_device *pdev)
 {
 	struct as3722_pctrl_info *as_pci;
 	int ret;
-	int tret;
 
 	as_pci = devm_kzalloc(&pdev->dev, sizeof(*as_pci), GFP_KERNEL);
 	if (!as_pci)
@@ -562,15 +571,15 @@ static int as3722_pinctrl_probe(struct platform_device *pdev)
 	as3722_pinctrl_desc.npins = ARRAY_SIZE(as3722_pins_desc);
 	as_pci->pctl = pinctrl_register(&as3722_pinctrl_desc,
 					&pdev->dev, as_pci);
-	if (!as_pci->pctl) {
+	if (IS_ERR(as_pci->pctl)) {
 		dev_err(&pdev->dev, "Couldn't register pinctrl driver\n");
-		return -EINVAL;
+		return PTR_ERR(as_pci->pctl);
 	}
 
 	as_pci->gpio_chip = as3722_gpio_chip;
-	as_pci->gpio_chip.dev = &pdev->dev;
+	as_pci->gpio_chip.parent = &pdev->dev;
 	as_pci->gpio_chip.of_node = pdev->dev.parent->of_node;
-	ret = gpiochip_add(&as_pci->gpio_chip);
+	ret = gpiochip_add_data(&as_pci->gpio_chip, as_pci);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "Couldn't register gpiochip, %d\n", ret);
 		goto fail_chip_add;
@@ -586,10 +595,7 @@ static int as3722_pinctrl_probe(struct platform_device *pdev)
 	return 0;
 
 fail_range_add:
-	tret = gpiochip_remove(&as_pci->gpio_chip);
-	if (tret < 0)
-		dev_warn(&pdev->dev, "Couldn't remove gpio chip, %d\n", tret);
-
+	gpiochip_remove(&as_pci->gpio_chip);
 fail_chip_add:
 	pinctrl_unregister(as_pci->pctl);
 	return ret;
@@ -598,16 +604,13 @@ fail_chip_add:
 static int as3722_pinctrl_remove(struct platform_device *pdev)
 {
 	struct as3722_pctrl_info *as_pci = platform_get_drvdata(pdev);
-	int ret;
 
-	ret = gpiochip_remove(&as_pci->gpio_chip);
-	if (ret < 0)
-		return ret;
+	gpiochip_remove(&as_pci->gpio_chip);
 	pinctrl_unregister(as_pci->pctl);
 	return 0;
 }
 
-static struct of_device_id as3722_pinctrl_of_match[] = {
+static const struct of_device_id as3722_pinctrl_of_match[] = {
 	{ .compatible = "ams,as3722-pinctrl", },
 	{ },
 };
@@ -616,7 +619,6 @@ MODULE_DEVICE_TABLE(of, as3722_pinctrl_of_match);
 static struct platform_driver as3722_pinctrl_driver = {
 	.driver = {
 		.name = "as3722-pinctrl",
-		.owner = THIS_MODULE,
 		.of_match_table = as3722_pinctrl_of_match,
 	},
 	.probe = as3722_pinctrl_probe,

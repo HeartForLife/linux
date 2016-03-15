@@ -782,24 +782,11 @@ static int ur_release(struct inode *inode, struct file *file)
 
 static loff_t ur_llseek(struct file *file, loff_t offset, int whence)
 {
-	loff_t newpos;
-
 	if ((file->f_flags & O_ACCMODE) != O_RDONLY)
 		return -ESPIPE; /* seek allowed only for reader */
 	if (offset % PAGE_SIZE)
 		return -ESPIPE; /* only multiples of 4K allowed */
-	switch (whence) {
-	case 0: /* SEEK_SET */
-		newpos = offset;
-		break;
-	case 1: /* SEEK_CUR */
-		newpos = file->f_pos + offset;
-		break;
-	default:
-		return -EINVAL;
-	}
-	file->f_pos = newpos;
-	return newpos;
+	return no_seek_end_llseek(file, offset, whence);
 }
 
 static const struct file_operations ur_fops = {
@@ -922,8 +909,8 @@ static int ur_set_online(struct ccw_device *cdev)
 		goto fail_free_cdev;
 	}
 
-	urd->device = device_create(vmur_class, NULL, urd->char_device->dev,
-				    NULL, "%s", node_id);
+	urd->device = device_create(vmur_class, &cdev->dev,
+				    urd->char_device->dev, NULL, "%s", node_id);
 	if (IS_ERR(urd->device)) {
 		rc = PTR_ERR(urd->device);
 		TRACE("ur_set_online: device_create rc=%d\n", rc);

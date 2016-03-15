@@ -132,10 +132,14 @@ qh_refresh (struct ehci_hcd *ehci, struct ehci_qh *qh)
 	 * qtd is updated in qh_completions(). Update the QH
 	 * overlay here.
 	 */
-	if (qh->hw->hw_token & ACTIVE_BIT(ehci))
+	if (qh->hw->hw_token & ACTIVE_BIT(ehci)) {
 		qh->hw->hw_qtd_next = qtd->hw_next;
-	else
+		if (qh->should_be_inactive)
+			ehci_warn(ehci, "qh %p should be inactive!\n", qh);
+	} else {
 		qh_update(ehci, qh, qtd);
+	}
+	qh->should_be_inactive = 0;
 }
 
 /*-------------------------------------------------------------------------*/
@@ -168,13 +172,13 @@ static void ehci_clear_tt_buffer(struct ehci_hcd *ehci, struct ehci_qh *qh,
 	 * Note: this routine is never called for Isochronous transfers.
 	 */
 	if (urb->dev->tt && !usb_pipeint(urb->pipe) && !qh->clearing_tt) {
-#if defined(DEBUG) || defined(CONFIG_DYNAMIC_DEBUG)
+#ifdef CONFIG_DYNAMIC_DEBUG
 		struct usb_device *tt = urb->dev->tt->hub;
 		dev_dbg(&tt->dev,
 			"clear tt buffer port %d, a%d ep%d t%08x\n",
 			urb->dev->ttport, urb->dev->devnum,
 			usb_pipeendpoint(urb->pipe), token);
-#endif /* DEBUG || CONFIG_DYNAMIC_DEBUG */
+#endif /* CONFIG_DYNAMIC_DEBUG */
 		if (!ehci_is_TDI(ehci)
 				|| urb->dev->tt->hub !=
 				   ehci_to_hcd(ehci)->self.root_hub) {
@@ -438,6 +442,7 @@ qh_completions (struct ehci_hcd *ehci, struct ehci_qh *qh)
 					(hw->hw_token & ACTIVE_BIT(ehci))) {
 				token = hc32_to_cpu(ehci, hw->hw_token);
 				hw->hw_token &= ~ACTIVE_BIT(ehci);
+				qh->should_be_inactive = 1;
 
 				/* An unlink may leave an incomplete
 				 * async transaction in the TT buffer.

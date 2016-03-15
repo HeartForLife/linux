@@ -36,10 +36,10 @@ static void omap_mcbsp_write(struct omap_mcbsp *mcbsp, u16 reg, u32 val)
 
 	if (mcbsp->pdata->reg_size == 2) {
 		((u16 *)mcbsp->reg_cache)[reg] = (u16)val;
-		__raw_writew((u16)val, addr);
+		writew_relaxed((u16)val, addr);
 	} else {
 		((u32 *)mcbsp->reg_cache)[reg] = val;
-		__raw_writel(val, addr);
+		writel_relaxed(val, addr);
 	}
 }
 
@@ -48,22 +48,22 @@ static int omap_mcbsp_read(struct omap_mcbsp *mcbsp, u16 reg, bool from_cache)
 	void __iomem *addr = mcbsp->io_base + reg * mcbsp->pdata->reg_step;
 
 	if (mcbsp->pdata->reg_size == 2) {
-		return !from_cache ? __raw_readw(addr) :
+		return !from_cache ? readw_relaxed(addr) :
 				     ((u16 *)mcbsp->reg_cache)[reg];
 	} else {
-		return !from_cache ? __raw_readl(addr) :
+		return !from_cache ? readl_relaxed(addr) :
 				     ((u32 *)mcbsp->reg_cache)[reg];
 	}
 }
 
 static void omap_mcbsp_st_write(struct omap_mcbsp *mcbsp, u16 reg, u32 val)
 {
-	__raw_writel(val, mcbsp->st_data->io_base_st + reg);
+	writel_relaxed(val, mcbsp->st_data->io_base_st + reg);
 }
 
 static int omap_mcbsp_st_read(struct omap_mcbsp *mcbsp, u16 reg)
 {
-	return __raw_readl(mcbsp->st_data->io_base_st + reg);
+	return readl_relaxed(mcbsp->st_data->io_base_st + reg);
 }
 
 #define MCBSP_READ(mcbsp, reg) \
@@ -621,8 +621,7 @@ void omap_mcbsp_free(struct omap_mcbsp *mcbsp)
 	mcbsp->reg_cache = NULL;
 	spin_unlock(&mcbsp->lock);
 
-	if (reg_cache)
-		kfree(reg_cache);
+	kfree(reg_cache);
 }
 
 /*
@@ -966,25 +965,15 @@ int omap_mcbsp_init(struct platform_device *pdev)
 	mcbsp->free = true;
 
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "mpu");
-	if (!res) {
+	if (!res)
 		res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-		if (!res) {
-			dev_err(mcbsp->dev, "invalid memory resource\n");
-			return -ENOMEM;
-		}
-	}
-	if (!devm_request_mem_region(&pdev->dev, res->start, resource_size(res),
-				     dev_name(&pdev->dev))) {
-		dev_err(mcbsp->dev, "memory region already claimed\n");
-		return -ENODEV;
-	}
+
+	mcbsp->io_base = devm_ioremap_resource(&pdev->dev, res);
+	if (IS_ERR(mcbsp->io_base))
+		return PTR_ERR(mcbsp->io_base);
 
 	mcbsp->phys_base = res->start;
 	mcbsp->reg_cache_size = resource_size(res);
-	mcbsp->io_base = devm_ioremap(&pdev->dev, res->start,
-				      resource_size(res));
-	if (!mcbsp->io_base)
-		return -ENOMEM;
 
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "dma");
 	if (!res)

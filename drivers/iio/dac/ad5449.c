@@ -204,7 +204,12 @@ static const struct iio_info ad5449_info = {
 	.info_mask_separate = BIT(IIO_CHAN_INFO_RAW) |		\
 		BIT(IIO_CHAN_INFO_SCALE),			\
 	.address = (chan),					\
-	.scan_type = IIO_ST('u', (bits), 16, 12 - (bits)),	\
+	.scan_type = {						\
+		.sign = 'u',					\
+		.realbits = (bits),				\
+		.storagebits = 16,				\
+		.shift = 12 - (bits),				\
+	},							\
 }
 
 #define DECLARE_AD5449_CHANNELS(name, bits) \
@@ -351,7 +356,6 @@ MODULE_DEVICE_TABLE(spi, ad5449_spi_ids);
 static struct spi_driver ad5449_spi_driver = {
 	.driver = {
 		.name = "ad5449",
-		.owner = THIS_MODULE,
 	},
 	.probe = ad5449_spi_probe,
 	.remove = ad5449_spi_remove,

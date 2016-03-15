@@ -97,6 +97,11 @@ const struct address_space_operations gfs2_meta_aops = {
 	.releasepage = gfs2_releasepage,
 };
 
+const struct address_space_operations gfs2_rgrp_aops = {
+	.writepage = gfs2_aspace_writepage,
+	.releasepage = gfs2_releasepage,
+};
+
 /**
  * gfs2_getbuf - Get a buffer with a given address space
  * @gl: the glock
@@ -109,12 +114,15 @@ const struct address_space_operations gfs2_meta_aops = {
 struct buffer_head *gfs2_getbuf(struct gfs2_glock *gl, u64 blkno, int create)
 {
 	struct address_space *mapping = gfs2_glock2aspace(gl);
-	struct gfs2_sbd *sdp = gl->gl_sbd;
+	struct gfs2_sbd *sdp = gl->gl_name.ln_sbd;
 	struct page *page;
 	struct buffer_head *bh;
 	unsigned int shift;
 	unsigned long index;
 	unsigned int bufnum;
+
+	if (mapping == NULL)
+		mapping = &sdp->sd_aspace;
 
 	shift = PAGE_CACHE_SHIFT - sdp->sd_sb.sb_bsize_shift;
 	index = blkno >> shift;             /* convert block to page */
@@ -128,7 +136,8 @@ struct buffer_head *gfs2_getbuf(struct gfs2_glock *gl, u64 blkno, int create)
 			yield();
 		}
 	} else {
-		page = find_lock_page(mapping, index);
+		page = find_get_page_flags(mapping, index,
+						FGP_LOCK|FGP_ACCESSED);
 		if (!page)
 			return NULL;
 	}
@@ -145,7 +154,6 @@ struct buffer_head *gfs2_getbuf(struct gfs2_glock *gl, u64 blkno, int create)
 		map_bh(bh, sdp->sd_vfs, blkno);
 
 	unlock_page(page);
-	mark_page_accessed(page);
 	page_cache_release(page);
 
 	return bh;
@@ -179,6 +187,52 @@ struct buffer_head *gfs2_meta_new(struct gfs2_glock *gl, u64 blkno)
 	return bh;
 }
 
+static void gfs2_meta_read_endio(struct bio *bio)
+{
+	struct bio_vec *bvec;
+	int i;
+
+	bio_for_each_segment_all(bvec, bio, i) {
+		struct page *page = bvec->bv_page;
+		struct buffer_head *bh = page_buffers(page);
+		unsigned int len = bvec->bv_len;
+
+		while (bh_offset(bh) < bvec->bv_offset)
+			bh = bh->b_this_page;
+		do {
+			struct buffer_head *next = bh->b_this_page;
+			len -= bh->b_size;
+			bh->b_end_io(bh, !bio->bi_error);
+			bh = next;
+		} while (bh && len);
+	}
+	bio_put(bio);
+}
+
+/*
+ * Submit several consecutive buffer head I/O requests as a single bio I/O
+ * request.  (See submit_bh_wbc.)
+ */
+static void gfs2_submit_bhs(int rw, struct buffer_head *bhs[], int num)
+{
+	struct buffer_head *bh = bhs[0];
+	struct bio *bio;
+	int i;
+
+	if (!num)
+		return;
+
+	bio = bio_alloc(GFP_NOIO, num);
+	bio->bi_iter.bi_sector = bh->b_blocknr * (bh->b_size >> 9);
+	bio->bi_bdev = bh->b_bdev;
+	for (i = 0; i < num; i++) {
+		bh = bhs[i];
+		bio_add_page(bio, bh->b_page, bh->b_size, bh_offset(bh));
+	}
+	bio->bi_end_io = gfs2_meta_read_endio;
+	submit_bio(rw, bio);
+}
+
 /**
  * gfs2_meta_read - Read a block from disk
  * @gl: The glock covering the block
@@ -190,10 +244,11 @@ struct buffer_head *gfs2_meta_new(struct gfs2_glock *gl, u64 blkno)
  */
 
 int gfs2_meta_read(struct gfs2_glock *gl, u64 blkno, int flags,
-		   struct buffer_head **bhp)
+		   int rahead, struct buffer_head **bhp)
 {
-	struct gfs2_sbd *sdp = gl->gl_sbd;
-	struct buffer_head *bh;
+	struct gfs2_sbd *sdp = gl->gl_name.ln_sbd;
+	struct buffer_head *bh, *bhs[2];
+	int num = 0;
 
 	if (unlikely(test_bit(SDF_SHUTDOWN, &sdp->sd_flags))) {
 		*bhp = NULL;
@@ -205,14 +260,31 @@ int gfs2_meta_read(struct gfs2_glock *gl, u64 blkno, int flags,
 	lock_buffer(bh);
 	if (buffer_uptodate(bh)) {
 		unlock_buffer(bh);
-		return 0;
+		flags &= ~DIO_WAIT;
+	} else {
+		bh->b_end_io = end_buffer_read_sync;
+		get_bh(bh);
+		bhs[num++] = bh;
 	}
-	bh->b_end_io = end_buffer_read_sync;
-	get_bh(bh);
-	submit_bh(READ_SYNC | REQ_META | REQ_PRIO, bh);
+
+	if (rahead) {
+		bh = gfs2_getbuf(gl, blkno + 1, CREATE);
+
+		lock_buffer(bh);
+		if (buffer_uptodate(bh)) {
+			unlock_buffer(bh);
+			brelse(bh);
+		} else {
+			bh->b_end_io = end_buffer_read_sync;
+			bhs[num++] = bh;
+		}
+	}
+
+	gfs2_submit_bhs(READ_SYNC | REQ_META | REQ_PRIO, bhs, num);
 	if (!(flags & DIO_WAIT))
 		return 0;
 
+	bh = *bhp;
 	wait_on_buffer(bh);
 	if (unlikely(!buffer_uptodate(bh))) {
 		struct gfs2_trans *tr = current->journal_info;
@@ -258,27 +330,27 @@ void gfs2_remove_from_journal(struct buffer_head *bh, struct gfs2_trans *tr, int
 	struct address_space *mapping = bh->b_page->mapping;
 	struct gfs2_sbd *sdp = gfs2_mapping2sbd(mapping);
 	struct gfs2_bufdata *bd = bh->b_private;
+	int was_pinned = 0;
 
 	if (test_clear_buffer_pinned(bh)) {
 		trace_gfs2_pin(bd, 0);
 		atomic_dec(&sdp->sd_log_pinned);
 		list_del_init(&bd->bd_list);
-		if (meta) {
-			gfs2_assert_warn(sdp, sdp->sd_log_num_buf);
-			sdp->sd_log_num_buf--;
+		if (meta)
 			tr->tr_num_buf_rm++;
-		} else {
-			gfs2_assert_warn(sdp, sdp->sd_log_num_databuf);
-			sdp->sd_log_num_databuf--;
+		else
 			tr->tr_num_databuf_rm++;
-		}
 		tr->tr_touched = 1;
+		was_pinned = 1;
 		brelse(bh);
 	}
 	if (bd) {
 		spin_lock(&sdp->sd_ail_lock);
 		if (bd->bd_tr) {
 			gfs2_trans_add_revoke(sdp, bd);
+		} else if (was_pinned) {
+			bh->b_private = NULL;
+			kmem_cache_free(gfs2_bufdata_cachep, bd);
 		}
 		spin_unlock(&sdp->sd_ail_lock);
 	}
@@ -333,8 +405,12 @@ int gfs2_meta_indirect_buffer(struct gfs2_inode *ip, int height, u64 num,
 	struct buffer_head *bh;
 	int ret = 0;
 	u32 mtype = height ? GFS2_METATYPE_IN : GFS2_METATYPE_DI;
+	int rahead = 0;
 
-	ret = gfs2_meta_read(gl, num, DIO_WAIT, &bh);
+	if (num == ip->i_no_addr)
+		rahead = ip->i_rahead;
+
+	ret = gfs2_meta_read(gl, num, DIO_WAIT, rahead, &bh);
 	if (ret == 0 && gfs2_metatype_check(sdp, bh, mtype)) {
 		brelse(bh);
 		ret = -EIO;
@@ -354,7 +430,7 @@ int gfs2_meta_indirect_buffer(struct gfs2_inode *ip, int height, u64 num,
 
 struct buffer_head *gfs2_meta_ra(struct gfs2_glock *gl, u64 dblock, u32 extlen)
 {
-	struct gfs2_sbd *sdp = gl->gl_sbd;
+	struct gfs2_sbd *sdp = gl->gl_name.ln_sbd;
 	struct buffer_head *first_bh, *bh;
 	u32 max_ra = gfs2_tune_get(sdp, gt_max_readahead) >>
 			  sdp->sd_sb.sb_bsize_shift;
